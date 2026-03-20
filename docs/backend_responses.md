@@ -31,8 +31,6 @@
 - user_id
 - active_goal_id
 - active_goal_title
-- has_other_active_goals
-- available_goal_switch_options[]
 - current_bot_state
 - current_bot_substate
 
@@ -43,7 +41,7 @@
 Список целей пользователя.
 
 Поля:
-- goals[]
+- goal[]
 
 Каждый элемент goals[]:
 - goal_id
