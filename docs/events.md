@@ -18,12 +18,6 @@
 ### goals_list_requested
 Пользователь запросил список своих целей.
 
-### goal_switch_requested
-Пользователь запросил переключение на другую цель.
-
-### active_goal_selected
-Пользователь выбрал активную цель в чате.
-
 ### new_goal_requested
 Пользователь начал создание новой цели.
 
@@ -129,9 +123,6 @@
 
 ### bot_session_started
 Создана или активирована сессия чата.
-
-### active_goal_changed
-В чате изменена текущая активная цель.
 
 ### user_chat_context_updated
 Обновлен общий контекст чата пользователя.
@@ -337,3 +328,21 @@ Weekly summary отправлен пользователю.
 
 ### reengagement_message_sent
 Сообщение для возврата пользователя отправлено.
+
+## Task events
+
+task_marked_done
+task_marked_not_done
+task_comment_submitted
+task_attachment_submitted
+
+## System events
+
+task_report_created
+task_report_updated
+proof_attached_to_task
+proof_validation_completed (optional, soft)
+
+## Important rule
+
+proof validation НЕ блокирует выполнение сценария
