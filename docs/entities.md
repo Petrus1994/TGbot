@@ -157,7 +157,15 @@ StepReport
 - comment (optional)
 - created_at
 
+StepReportFile
+
+- id
+- step_report_id
+- file_id
+
 ---
+
+
 
 ## 10. File
 Метаданные файла, который прислал пользователь.
