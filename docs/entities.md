@@ -145,12 +145,16 @@
 ## 9. StepReport
 Отчет по конкретному шагу внутри daily check-in.
 
-Поля:
+StepReport
+
 - id
-- daily_checkin_id
-- plan_step_id
-- status
-- comment
+- user_id
+- goal_id
+- step_id
+- date
+
+- result (done / not_done)
+- comment (optional)
 - created_at
 
 ---
