@@ -52,18 +52,6 @@
 - current_bot_substate
 - has_other_active_goals
 
----
-
-### set_active_goal
-Меняет активную цель в чате.
-
-Вход:
-- user_id
-- goal_id
-
-Выход:
-- success
-- updated_chat_context
 
 ---
 
