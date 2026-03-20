@@ -145,6 +145,11 @@
 - proof_status
 - can_submit_proof
 
+report_status
+user_result (done / not_done)
+comment_allowed
+attachment_allowed
+
 ---
 
 ## 8. DailyCheckinView
@@ -195,6 +200,14 @@
 - passed
 - failed
 - uncertain
+
+ProofValidationResult
+
+- result: accepted / unclear / rejected
+- confidence: number
+
+Важно:
+- результат не блокирует пользователя
 
 ---
 
