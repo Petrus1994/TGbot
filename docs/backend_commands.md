@@ -50,22 +50,9 @@
 - active_goal_title
 - current_bot_state
 - current_bot_substate
-- has_other_active_goals
 
 ---
 
-### set_active_goal
-Меняет активную цель в чате.
-
-Вход:
-- user_id
-- goal_id
-
-Выход:
-- success
-- updated_chat_context
-
----
 
 ### clear_chat_state
 Очищает глобальное состояние чата.
