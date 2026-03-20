@@ -542,6 +542,11 @@
 - files[]
 
 ---
+validate_proof(file_id, step_id)
+
+Важно:
+- не является блокирующей командой
+- используется только как дополнительная оценка
 
 ## 7. Прогресс
 
@@ -811,3 +816,13 @@
 
 Выход:
 - success
+
+  ## Task reporting
+
+mark_task_done(user_id, goal_id, step_id, date)
+
+mark_task_not_done(user_id, goal_id, step_id, date)
+
+submit_task_comment(user_id, goal_id, step_id, date, comment)
+
+attach_task_file(user_id, goal_id, step_id, date, file_id)
