@@ -1,13 +1,12 @@
-import json
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from app.schemas.plan import AcceptPlanResponse, PlanContent, PlanResponse
+from app.schemas.plan import AcceptPlanResponse, PlanResponse
 
 _PLAN_STORE: dict[str, dict] = {}
 
 
-def _build_stub_plan(goal_id: UUID) -> dict:
+def _build_stub_plan(goal_id: str) -> dict:
     return {
         "duration_weeks": 4,
         "milestones": [
@@ -18,60 +17,42 @@ def _build_stub_plan(goal_id: UUID) -> dict:
         ],
         "steps": [
             {
-                "week": 1,
+                "step_id": f"{goal_id}-step-1",
                 "title": "Foundation",
                 "description": "Define constraints, available time, and success metrics.",
-                "tasks": [
-                    "Write down the exact target outcome",
-                    "List blockers and available resources",
-                    "Commit to 3 fixed work sessions this week",
-                ],
+                "order": 1,
             },
             {
-                "week": 2,
+                "step_id": f"{goal_id}-step-2",
                 "title": "Execution start",
                 "description": "Begin the first active implementation cycle.",
-                "tasks": [
-                    "Complete the smallest meaningful deliverable",
-                    "Track completion after each session",
-                    "Adjust workload if plan is unrealistic",
-                ],
+                "order": 2,
             },
             {
-                "week": 3,
+                "step_id": f"{goal_id}-step-3",
                 "title": "Momentum",
                 "description": "Increase consistency and remove friction.",
-                "tasks": [
-                    "Repeat the core routine at least 3 times",
-                    "Remove one recurring blocker",
-                    "Document what is already working",
-                ],
+                "order": 3,
             },
             {
-                "week": 4,
+                "step_id": f"{goal_id}-step-4",
                 "title": "Review and next step",
                 "description": "Evaluate results and prepare the next plan version.",
-                "tasks": [
-                    "Assess progress against initial metric",
-                    "Keep what worked, discard what did not",
-                    "Prepare next 4-week iteration",
-                ],
+                "order": 4,
             },
         ],
     }
 
 
-def generate_plan(goal_id: UUID, regenerate: bool = False) -> PlanResponse:
-    goal_id_str = str(goal_id)
-
-    if goal_id_str in _PLAN_STORE and not regenerate:
-        return PlanResponse(**_PLAN_STORE[goal_id_str])
+def generate_plan(goal_id: str, regenerate: bool = False) -> PlanResponse:
+    if goal_id in _PLAN_STORE and not regenerate:
+        return PlanResponse(**_PLAN_STORE[goal_id])
 
     now = datetime.now(timezone.utc)
     content = _build_stub_plan(goal_id)
 
     plan = {
-        "id": uuid4(),
+        "id": str(uuid4()),
         "goal_id": goal_id,
         "status": "draft",
         "title": "Personal goal execution plan",
@@ -82,20 +63,19 @@ def generate_plan(goal_id: UUID, regenerate: bool = False) -> PlanResponse:
         "updated_at": now,
     }
 
-    _PLAN_STORE[goal_id_str] = plan
+    _PLAN_STORE[goal_id] = plan
     return PlanResponse(**plan)
 
 
-def get_current_plan(goal_id: UUID) -> PlanResponse | None:
-    plan = _PLAN_STORE.get(str(goal_id))
+def get_current_plan(goal_id: str) -> PlanResponse | None:
+    plan = _PLAN_STORE.get(goal_id)
     if not plan:
         return None
     return PlanResponse(**plan)
 
 
-def accept_plan(goal_id: UUID) -> AcceptPlanResponse:
-    goal_id_str = str(goal_id)
-    plan = _PLAN_STORE.get(goal_id_str)
+def accept_plan(goal_id: str) -> AcceptPlanResponse:
+    plan = _PLAN_STORE.get(goal_id)
 
     if not plan:
         raise ValueError("No generated plan found for this goal.")

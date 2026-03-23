@@ -1,17 +1,12 @@
-from __future__ import annotations
-
 from datetime import datetime
-from typing import Any
-from uuid import UUID
-
 from pydantic import BaseModel, Field
 
 
 class PlanStep(BaseModel):
-    week: int = Field(..., ge=1)
+    step_id: str
     title: str
-    description: str
-    tasks: list[str]
+    description: str | None = None
+    order: int = Field(..., ge=1)
 
 
 class PlanContent(BaseModel):
@@ -25,21 +20,17 @@ class GeneratePlanRequest(BaseModel):
 
 
 class PlanResponse(BaseModel):
-    id: UUID
-    goal_id: UUID
+    id: str
+    goal_id: str
     status: str
     title: str
-    summary: str | None
+    summary: str | None = None
     content: PlanContent
-    accepted_at: datetime | None
+    accepted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class AcceptPlanResponse(BaseModel):
-    success: bool = True
+    success: bool
     plan: PlanResponse
-
-
-class ErrorResponse(BaseModel):
-    detail: str
