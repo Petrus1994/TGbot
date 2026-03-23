@@ -1,9 +1,7 @@
-from uuid import UUID
-
 from fastapi import APIRouter, HTTPException, status
 
 from app.schemas.plan import AcceptPlanResponse, GeneratePlanRequest, PlanResponse
-from app.services.plan_service import generate_plan, get_current_plan, accept_plan
+from app.services.plan_service import accept_plan, generate_plan, get_current_plan
 
 router = APIRouter(tags=["plans"])
 
@@ -13,7 +11,7 @@ router = APIRouter(tags=["plans"])
     response_model=PlanResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def generate_plan_endpoint(goal_id: UUID, payload: GeneratePlanRequest):
+def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
     try:
         return generate_plan(goal_id=goal_id, regenerate=payload.regenerate)
     except Exception as e:
@@ -27,7 +25,7 @@ def generate_plan_endpoint(goal_id: UUID, payload: GeneratePlanRequest):
     "/goals/{goal_id}/plan/current",
     response_model=PlanResponse,
 )
-def get_current_plan_endpoint(goal_id: UUID):
+def get_current_plan_endpoint(goal_id: str):
     plan = get_current_plan(goal_id=goal_id)
 
     if not plan:
@@ -43,7 +41,7 @@ def get_current_plan_endpoint(goal_id: UUID):
     "/goals/{goal_id}/plan/accept",
     response_model=AcceptPlanResponse,
 )
-def accept_plan_endpoint(goal_id: UUID):
+def accept_plan_endpoint(goal_id: str):
     try:
         return accept_plan(goal_id=goal_id)
     except ValueError as e:

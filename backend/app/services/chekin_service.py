@@ -1,10 +1,6 @@
 from datetime import date, datetime, timezone
 
-from app.schemas.checkin import (
-    CheckinResponse,
-    CheckinStepStatusResponse,
-    CompleteCheckinResponse,
-)
+from app.schemas.checkin import CheckinResponse, CompleteCheckinResponse
 from app.services.plan_service import get_current_plan
 
 _CHECKIN_STORE: dict[str, dict] = {}
@@ -12,6 +8,13 @@ _CHECKIN_STORE: dict[str, dict] = {}
 
 def _today_key(goal_id: str) -> str:
     return f"{goal_id}:{date.today().isoformat()}"
+
+
+def _find_checkin_by_id(checkin_id: str) -> dict | None:
+    for value in _CHECKIN_STORE.values():
+        if value["checkin_id"] == checkin_id:
+            return value
+    return None
 
 
 def create_or_get_today_checkin(goal_id: str) -> CheckinResponse:
@@ -68,8 +71,8 @@ def save_checkin_report(checkin_id: str, report_text: str) -> CheckinResponse:
 
 
 def set_step_status(checkin_id: str, step_id: str, status: str) -> CheckinResponse:
-    if status not in {"done", "failed"}:
-        raise ValueError("Invalid status. Use 'done' or 'failed'.")
+    if status not in {"pending", "done", "failed"}:
+        raise ValueError("Invalid status. Use 'pending', 'done' or 'failed'.")
 
     checkin = _find_checkin_by_id(checkin_id)
     if not checkin:
@@ -96,10 +99,3 @@ def complete_checkin(checkin_id: str) -> CompleteCheckinResponse:
         success=True,
         checkin=CheckinResponse(**checkin),
     )
-
-
-def _find_checkin_by_id(checkin_id: str) -> dict | None:
-    for value in _CHECKIN_STORE.values():
-        if value["checkin_id"] == checkin_id:
-            return value
-    return None
