@@ -1,5 +1,6 @@
 from sqlalchemy import text
 from fastapi import HTTPException
+
 from app.db import engine
 from app.schemas.goal import CreateGoalRequest
 
@@ -200,4 +201,90 @@ def set_active_goal(user_id: str, goal_id: str) -> dict:
             "last_selected_goal_id": str(context["last_selected_goal_id"]) if context["last_selected_goal_id"] else None,
             "state": context["state"],
             "substate": context["substate"],
+        }
+
+
+def get_goal_by_id(goal_id: str) -> dict | None:
+    with engine.begin() as connection:
+        goal = connection.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    title,
+                    description,
+                    category,
+                    target_date,
+                    status,
+                    priority
+                FROM goals
+                WHERE id = :goal_id
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not goal:
+            return None
+
+        return {
+            "goal_id": str(goal["id"]),
+            "user_id": str(goal["user_id"]),
+            "title": goal["title"],
+            "description": goal["description"],
+            "category": goal["category"],
+            "target_date": goal["target_date"],
+            "status": goal["status"],
+            "priority": goal["priority"],
+        }
+
+
+def get_goal_status(goal_id: str) -> str:
+    with engine.begin() as connection:
+        goal = connection.execute(
+            text(
+                """
+                SELECT status
+                FROM goals
+                WHERE id = :goal_id
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not goal:
+            raise HTTPException(status_code=404, detail="goal_not_found")
+
+        return goal["status"]
+
+
+def update_goal_status(goal_id: str, status: str) -> dict:
+    allowed_statuses = {"draft", "active", "completed", "failed"}
+
+    if status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="invalid_goal_status")
+
+    with engine.begin() as connection:
+        goal = connection.execute(
+            text(
+                """
+                UPDATE goals
+                SET status = :status
+                WHERE id = :goal_id
+                RETURNING id, status
+                """
+            ),
+            {
+                "goal_id": goal_id,
+                "status": status,
+            },
+        ).mappings().first()
+
+        if not goal:
+            raise HTTPException(status_code=404, detail="goal_not_found")
+
+        return {
+            "goal_id": str(goal["id"]),
+            "status": goal["status"],
         }
