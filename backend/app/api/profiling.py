@@ -1,18 +1,25 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import text
+
+from app.db import engine
 from app.schemas.profiling import (
-    ProfilingStartResponse,
-    ProfilingQuestionResponse,
     ProfilingAnswerRequest,
+    ProfilingQuestionResponse,
+    ProfilingStartResponse,
     ProfilingStateResponse,
 )
 from app.services.profiling_service import (
-    start_profiling,
     get_current_question,
-    submit_profiling_answer,
     get_profiling_state,
+    start_profiling,
+    submit_profiling_answer,
 )
+from app.services.ai_profiling_service import AIProfilingService
 
 router = APIRouter(prefix="/goals/{goal_id}/profiling", tags=["profiling"])
+
+# AI profiling сервис
+ai_profiling_service = AIProfilingService()
 
 
 @router.post("/start", response_model=ProfilingStartResponse)
@@ -33,3 +40,36 @@ def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswerReque
 @router.get("/state", response_model=ProfilingStateResponse)
 def get_profiling_state_endpoint(goal_id: str):
     return get_profiling_state(goal_id)
+
+
+# 🔥 Новый endpoint для AI profiling
+@router.post("/ai-questions")
+async def generate_ai_profiling_questions(goal_id: str):
+    """
+    Генерирует динамические profiling вопросы через AI.
+    НЕ заменяет основной profiling flow.
+    """
+
+    with engine.begin() as connection:
+        goal = connection.execute(
+            text(
+                """
+                SELECT id, title
+                FROM goals
+                WHERE id = :goal_id
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+    if not goal:
+        raise HTTPException(status_code=404, detail="goal_not_found")
+
+    try:
+        result = await ai_profiling_service.generate_questions(goal["title"])
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"ai_profiling_failed: {str(e)}",
+        ) from e

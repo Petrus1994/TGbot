@@ -1,5 +1,10 @@
+from __future__ import annotations
+
+import json
+
 from fastapi import HTTPException
 from sqlalchemy import text
+
 from app.db import engine
 
 
@@ -23,6 +28,10 @@ PROFILING_QUESTIONS = [
     {
         "key": "time_budget",
         "text": "Сколько времени в день или неделю ты готов уделять этой цели?",
+    },
+    {
+        "key": "coach_style",
+        "text": "Какой стиль коучинга тебе подходит? aggressive / balanced / soft / или опиши свой вариант.",
     },
 ]
 
@@ -99,6 +108,8 @@ def start_profiling(goal_id: str) -> dict:
             "current_question_index": 0,
         }
 
+        first_question = PROFILING_QUESTIONS[0]
+
         connection.execute(
             text(
                 """
@@ -126,13 +137,13 @@ def start_profiling(goal_id: str) -> dict:
                     :user_id,
                     :goal_id,
                     'awaiting_profiling_answer',
-                    'current_level',
+                    :substate,
                     CAST(:context_json AS jsonb)
                 )
                 ON CONFLICT (goal_id)
                 DO UPDATE SET
                     state = 'awaiting_profiling_answer',
-                    substate = 'current_level',
+                    substate = :substate,
                     context_json = CAST(:context_json AS jsonb),
                     updated_at = NOW()
                 """
@@ -140,11 +151,10 @@ def start_profiling(goal_id: str) -> dict:
             {
                 "user_id": goal["user_id"],
                 "goal_id": goal_id,
-                "context_json": __import__("json").dumps(context),
+                "substate": first_question["key"],
+                "context_json": json.dumps(context),
             },
         )
-
-        first_question = PROFILING_QUESTIONS[0]
 
         return {
             "goal_id": goal_id,
@@ -181,6 +191,10 @@ def get_current_question(goal_id: str) -> dict:
 
 
 def submit_profiling_answer(goal_id: str, answer: str) -> dict:
+    cleaned_answer = answer.strip()
+    if not cleaned_answer:
+        raise HTTPException(status_code=400, detail="empty_answer")
+
     with engine.begin() as connection:
         session = _get_goal_session(connection, goal_id)
         context = session["context_json"] or {}
@@ -192,7 +206,7 @@ def submit_profiling_answer(goal_id: str, answer: str) -> dict:
             raise HTTPException(status_code=400, detail="profiling_already_completed")
 
         current_question = PROFILING_QUESTIONS[current_question_index]
-        answers[current_question["key"]] = answer
+        answers[current_question["key"]] = cleaned_answer
 
         next_index = current_question_index + 1
         is_completed = next_index >= len(PROFILING_QUESTIONS)
@@ -212,18 +226,11 @@ def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                     UPDATE goals
                     SET
                         status = 'planning',
-                        time_budget_value = CASE
-                            WHEN :time_budget_key = 'time_budget' THEN time_budget_value
-                            ELSE time_budget_value
-                        END,
                         updated_at = NOW()
                     WHERE id = :goal_id
                     """
                 ),
-                {
-                    "goal_id": goal_id,
-                    "time_budget_key": current_question["key"],
-                },
+                {"goal_id": goal_id},
             )
         else:
             new_state = "awaiting_profiling_answer"
@@ -245,7 +252,7 @@ def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 "goal_id": goal_id,
                 "state": new_state,
                 "substate": new_substate,
-                "context_json": __import__("json").dumps(new_context),
+                "context_json": json.dumps(new_context),
             },
         )
 
@@ -268,3 +275,15 @@ def get_profiling_state(goal_id: str) -> dict:
             substate=session["substate"],
             context=context,
         )
+
+
+def get_profiling_answers(goal_id: str) -> dict[str, str]:
+    with engine.begin() as connection:
+        session = _get_goal_session(connection, goal_id)
+        context = session["context_json"] or {}
+        answers = context.get("answers", {})
+
+        if not isinstance(answers, dict):
+            return {}
+
+        return {str(key): str(value) for key, value in answers.items()}

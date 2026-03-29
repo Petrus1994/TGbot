@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProfilingStartResponse(BaseModel):
@@ -22,7 +22,7 @@ class ProfilingQuestionResponse(BaseModel):
 
 
 class ProfilingAnswerRequest(BaseModel):
-    answer: str
+    answer: str = Field(..., min_length=1)
 
 
 class ProfilingStateResponse(BaseModel):
@@ -34,4 +34,4 @@ class ProfilingStateResponse(BaseModel):
     current_question_key: str | None = None
     current_question_text: str | None = None
     is_completed: bool
-    answers: dict
+    answers: dict[str, str] = Field(default_factory=dict)

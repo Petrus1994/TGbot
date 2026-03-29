@@ -1,9 +1,15 @@
+from __future__ import annotations
+
+import json
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID
 
+from sqlalchemy.orm import Session
+
+from app.db import SessionLocal
+from app.models.plan import GoalPlan, PlanStatus
+from app.repositories.plan_repository import PlanRepository
 from app.schemas.plan import AcceptPlanResponse, PlanResponse
-
-_PLAN_STORE: dict[str, dict] = {}
 
 
 def _build_stub_plan(goal_id: str) -> dict:
@@ -44,48 +50,107 @@ def _build_stub_plan(goal_id: str) -> dict:
     }
 
 
+def _serialize_plan_content(content: dict) -> str:
+    return json.dumps(content, ensure_ascii=False)
+
+
+def _deserialize_plan_content(content_json: str) -> dict:
+    return json.loads(content_json)
+
+
+def _to_plan_response(plan: GoalPlan) -> PlanResponse:
+    return PlanResponse(
+        id=str(plan.id),
+        goal_id=str(plan.goal_id),
+        status=plan.status.value if hasattr(plan.status, "value") else str(plan.status),
+        title=plan.title,
+        summary=plan.summary,
+        content=_deserialize_plan_content(plan.content_json),
+        accepted_at=plan.accepted_at,
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+    )
+
+
+def save_generated_plan(
+    *,
+    goal_id: str,
+    title: str,
+    summary: str,
+    content: dict,
+    status: str = "draft",
+) -> PlanResponse:
+    db: Session = SessionLocal()
+    try:
+        repo = PlanRepository(db)
+
+        plan = repo.create(
+            goal_id=UUID(goal_id),
+            title=title,
+            summary=summary,
+            content_json=_serialize_plan_content(content),
+            status=PlanStatus(status),
+        )
+
+        return _to_plan_response(plan)
+    finally:
+        db.close()
+
+
 def generate_plan(goal_id: str, regenerate: bool = False) -> PlanResponse:
-    if goal_id in _PLAN_STORE and not regenerate:
-        return PlanResponse(**_PLAN_STORE[goal_id])
+    db: Session = SessionLocal()
+    try:
+        repo = PlanRepository(db)
 
-    now = datetime.now(timezone.utc)
-    content = _build_stub_plan(goal_id)
+        existing = repo.get_latest_by_goal_id(UUID(goal_id))
+        if existing and not regenerate:
+            return _to_plan_response(existing)
 
-    plan = {
-        "id": str(uuid4()),
-        "goal_id": goal_id,
-        "status": "draft",
-        "title": "Personal goal execution plan",
-        "summary": "Stub plan generated from current goal and profiling data.",
-        "content": content,
-        "accepted_at": None,
-        "created_at": now,
-        "updated_at": now,
-    }
+        content = _build_stub_plan(goal_id)
 
-    _PLAN_STORE[goal_id] = plan
-    return PlanResponse(**plan)
+        plan = repo.create(
+            goal_id=UUID(goal_id),
+            title="Personal goal execution plan",
+            summary="Stub plan generated from current goal and profiling data.",
+            content_json=_serialize_plan_content(content),
+            status=PlanStatus.draft,
+        )
+
+        return _to_plan_response(plan)
+    finally:
+        db.close()
 
 
 def get_current_plan(goal_id: str) -> PlanResponse | None:
-    plan = _PLAN_STORE.get(goal_id)
-    if not plan:
-        return None
-    return PlanResponse(**plan)
+    db: Session = SessionLocal()
+    try:
+        repo = PlanRepository(db)
+        plan = repo.get_latest_by_goal_id(UUID(goal_id))
+        if not plan:
+            return None
+        return _to_plan_response(plan)
+    finally:
+        db.close()
 
 
 def accept_plan(goal_id: str) -> AcceptPlanResponse:
-    plan = _PLAN_STORE.get(goal_id)
+    db: Session = SessionLocal()
+    try:
+        repo = PlanRepository(db)
 
-    if not plan:
-        raise ValueError("No generated plan found for this goal.")
+        plan = repo.get_latest_by_goal_id(UUID(goal_id))
+        if not plan:
+            raise ValueError("No generated plan found for this goal.")
 
-    now = datetime.now(timezone.utc)
-    plan["status"] = "accepted"
-    plan["accepted_at"] = now
-    plan["updated_at"] = now
+        now = datetime.now(timezone.utc)
+        plan.status = PlanStatus.accepted
+        plan.accepted_at = now
 
-    return AcceptPlanResponse(
-        success=True,
-        plan=PlanResponse(**plan),
-    )
+        saved = repo.save(plan)
+
+        return AcceptPlanResponse(
+            success=True,
+            plan=_to_plan_response(saved),
+        )
+    finally:
+        db.close()
