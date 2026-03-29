@@ -7,6 +7,9 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    app_env: str = "development"
+    database_url: str
+
     openai_api_key: str = ""
 
     openai_model_mini: str = "gpt-4.1-mini"
@@ -16,6 +19,7 @@ class Settings(BaseSettings):
     ai_analysis_model: str = "gpt-5.4"
     ai_executor_model: str = "gpt-4.1-mini"
     ai_coach_model: str = "gpt-4.1-mini"
+
     ai_plan_generation_enabled: bool = True
     ai_plan_fallback_to_stub: bool = True
 
@@ -24,6 +28,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def openai_model(self) -> str:
+        return self.ai_plan_model
 
 
 settings = Settings()
