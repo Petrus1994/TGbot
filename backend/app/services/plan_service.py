@@ -51,11 +51,19 @@ def _build_stub_plan(goal_id: str) -> dict:
 
 
 def _serialize_plan_content(content: dict) -> str:
-    return json.dumps(content, ensure_ascii=False)
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception as e:
+        print(f"❌ JSON SERIALIZATION ERROR: {repr(e)}")
+        return "{}"
 
 
 def _deserialize_plan_content(content_json: str) -> dict:
-    return json.loads(content_json)
+    try:
+        return json.loads(content_json)
+    except Exception as e:
+        print(f"❌ JSON DESERIALIZATION ERROR: {repr(e)}")
+        return {}
 
 
 def _to_plan_response(plan: GoalPlan) -> PlanResponse:
@@ -93,6 +101,28 @@ def save_generated_plan(
         )
 
         return _to_plan_response(plan)
+
+    except Exception as e:
+        print(f"❌ SAVE GENERATED PLAN ERROR: {repr(e)}")
+
+        # 🔥 fallback внутри сервиса (чтобы не ронять всё)
+        try:
+            fallback_content = _build_stub_plan(goal_id)
+
+            plan = repo.create(
+                goal_id=UUID(goal_id),
+                title="Fallback plan",
+                summary="Generated due to internal error",
+                content_json=_serialize_plan_content(fallback_content),
+                status=PlanStatus.draft,
+            )
+
+            return _to_plan_response(plan)
+
+        except Exception as fallback_error:
+            print(f"❌ DOUBLE SAVE FAILURE: {repr(fallback_error)}")
+            raise
+
     finally:
         db.close()
 
@@ -117,6 +147,23 @@ def generate_plan(goal_id: str, regenerate: bool = False) -> PlanResponse:
         )
 
         return _to_plan_response(plan)
+
+    except Exception as e:
+        print(f"❌ GENERATE PLAN ERROR: {repr(e)}")
+
+        # 🔥 безопасный fallback
+        return PlanResponse(
+            id="fallback",
+            goal_id=goal_id,
+            status="draft",
+            title="Temporary fallback plan",
+            summary="Plan generation failed",
+            content=_build_stub_plan(goal_id),
+            accepted_at=None,
+            created_at=None,
+            updated_at=None,
+        )
+
     finally:
         db.close()
 
@@ -126,9 +173,16 @@ def get_current_plan(goal_id: str) -> PlanResponse | None:
     try:
         repo = PlanRepository(db)
         plan = repo.get_latest_by_goal_id(UUID(goal_id))
+
         if not plan:
             return None
+
         return _to_plan_response(plan)
+
+    except Exception as e:
+        print(f"❌ GET CURRENT PLAN ERROR: {repr(e)}")
+        return None
+
     finally:
         db.close()
 
@@ -152,5 +206,10 @@ def accept_plan(goal_id: str) -> AcceptPlanResponse:
             success=True,
             plan=_to_plan_response(saved),
         )
+
+    except Exception as e:
+        print(f"❌ ACCEPT PLAN ERROR: {repr(e)}")
+        raise
+
     finally:
         db.close()

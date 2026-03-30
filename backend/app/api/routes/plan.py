@@ -7,7 +7,11 @@ from app.core.exceptions import (
 )
 from app.schemas.plan import AcceptPlanResponse, GeneratePlanRequest, PlanResponse
 from app.services.plan_generation_service import PlanGenerationService
-from app.services.plan_service import accept_plan, generate_plan as generate_stub_plan, get_current_plan
+from app.services.plan_service import (
+    accept_plan,
+    generate_plan as generate_stub_plan,
+    get_current_plan,
+)
 
 router = APIRouter(tags=["plans"])
 
@@ -25,32 +29,68 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
             goal_id=goal_id,
             regenerate=payload.regenerate,
         )
+
     except GoalNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e) or "goal_not_found",
         ) from e
+
     except ProfilingIncompleteError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(e) or "profiling_incomplete",
         ) from e
-    except AIPlanGenerationError:
+
+    except AIPlanGenerationError as original_error:
+        print(f"❌ AI PLAN GENERATION ERROR: {repr(original_error)}")
+
         try:
             return generate_stub_plan(goal_id=goal_id, regenerate=payload.regenerate)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"plan_generation_failed: {str(e)}",
-            ) from e
-    except Exception:
+
+        except Exception as fallback_error:
+            print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
+
+            return {
+                "id": "fallback",
+                "goal_id": goal_id,
+                "status": "draft",
+                "title": "Temporary fallback plan",
+                "summary": "Plan generation failed, fallback used",
+                "content": {
+                    "duration_weeks": 1,
+                    "milestones": ["Temporary fallback"],
+                    "steps": [],
+                },
+                "accepted_at": None,
+                "created_at": None,
+                "updated_at": None,
+            }
+
+    except Exception as original_error:
+        print(f"❌ UNEXPECTED PLAN GENERATION ERROR: {repr(original_error)}")
+
         try:
             return generate_stub_plan(goal_id=goal_id, regenerate=payload.regenerate)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"plan_generation_failed: {str(e)}",
-            ) from e
+
+        except Exception as fallback_error:
+            print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
+
+            return {
+                "id": "fallback",
+                "goal_id": goal_id,
+                "status": "draft",
+                "title": "Temporary fallback plan",
+                "summary": "Plan generation failed, fallback used",
+                "content": {
+                    "duration_weeks": 1,
+                    "milestones": ["Temporary fallback"],
+                    "steps": [],
+                },
+                "accepted_at": None,
+                "created_at": None,
+                "updated_at": None,
+            }
 
 
 @router.get(

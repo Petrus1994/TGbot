@@ -18,7 +18,7 @@ class PlanStatus(str, Enum):
 
 
 class GoalPlan(Base):
-    __tablename__ = "goal_plans"
+    __tablename__ = "plans"  # 🔥 ФИКС: было goal_plans
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
