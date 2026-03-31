@@ -104,24 +104,7 @@ def save_generated_plan(
 
     except Exception as e:
         print(f"❌ SAVE GENERATED PLAN ERROR: {repr(e)}")
-
-        # 🔥 fallback внутри сервиса (чтобы не ронять всё)
-        try:
-            fallback_content = _build_stub_plan(goal_id)
-
-            plan = repo.create(
-                goal_id=UUID(goal_id),
-                title="Fallback plan",
-                summary="Generated due to internal error",
-                content_json=_serialize_plan_content(fallback_content),
-                status=PlanStatus.draft,
-            )
-
-            return _to_plan_response(plan)
-
-        except Exception as fallback_error:
-            print(f"❌ DOUBLE SAVE FAILURE: {repr(fallback_error)}")
-            raise
+        raise
 
     finally:
         db.close()
@@ -150,19 +133,7 @@ def generate_plan(goal_id: str, regenerate: bool = False) -> PlanResponse:
 
     except Exception as e:
         print(f"❌ GENERATE PLAN ERROR: {repr(e)}")
-
-        # 🔥 безопасный fallback
-        return PlanResponse(
-            id="fallback",
-            goal_id=goal_id,
-            status="draft",
-            title="Temporary fallback plan",
-            summary="Plan generation failed",
-            content=_build_stub_plan(goal_id),
-            accepted_at=None,
-            created_at=None,
-            updated_at=None,
-        )
+        raise
 
     finally:
         db.close()

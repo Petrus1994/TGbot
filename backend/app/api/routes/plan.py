@@ -51,21 +51,21 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
         except Exception as fallback_error:
             print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
 
-            return {
-                "id": "fallback",
-                "goal_id": goal_id,
-                "status": "draft",
-                "title": "Temporary fallback plan",
-                "summary": "Plan generation failed, fallback used",
-                "content": {
+            return PlanResponse(
+                id="fallback",
+                goal_id=goal_id,
+                status="draft",
+                title="Temporary fallback plan",
+                summary="Plan generation failed, fallback used",
+                content={
                     "duration_weeks": 1,
                     "milestones": ["Temporary fallback"],
                     "steps": [],
                 },
-                "accepted_at": None,
-                "created_at": None,
-                "updated_at": None,
-            }
+                accepted_at=None,
+                created_at=None,
+                updated_at=None,
+            )
 
     except Exception as original_error:
         print(f"❌ UNEXPECTED PLAN GENERATION ERROR: {repr(original_error)}")
@@ -76,21 +76,21 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
         except Exception as fallback_error:
             print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
 
-            return {
-                "id": "fallback",
-                "goal_id": goal_id,
-                "status": "draft",
-                "title": "Temporary fallback plan",
-                "summary": "Plan generation failed, fallback used",
-                "content": {
+            return PlanResponse(
+                id="fallback",
+                goal_id=goal_id,
+                status="draft",
+                title="Temporary fallback plan",
+                summary="Plan generation failed, fallback used",
+                content={
                     "duration_weeks": 1,
                     "milestones": ["Temporary fallback"],
                     "steps": [],
                 },
-                "accepted_at": None,
-                "created_at": None,
-                "updated_at": None,
-            }
+                accepted_at=None,
+                created_at=None,
+                updated_at=None,
+            )
 
 
 @router.get(
