@@ -58,4 +58,4 @@ class GoalPlan(Base):
         onupdate=func.now(),
     )
 
-    goal = relationship("Goal", back_populates="plans")
+    # временно убираем relationship, т.к. нет ORM модели Goal

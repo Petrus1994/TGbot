@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException, status
 
 from app.core.exceptions import (
@@ -50,6 +52,7 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
 
         except Exception as fallback_error:
             print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
+            now = datetime.now(timezone.utc)
 
             return PlanResponse(
                 id="fallback",
@@ -63,8 +66,8 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
                     "steps": [],
                 },
                 accepted_at=None,
-                created_at=None,
-                updated_at=None,
+                created_at=now,
+                updated_at=now,
             )
 
     except Exception as original_error:
@@ -75,6 +78,7 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
 
         except Exception as fallback_error:
             print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
+            now = datetime.now(timezone.utc)
 
             return PlanResponse(
                 id="fallback",
@@ -88,8 +92,8 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
                     "steps": [],
                 },
                 accepted_at=None,
-                created_at=None,
-                updated_at=None,
+                created_at=now,
+                updated_at=now,
             )
 
 
