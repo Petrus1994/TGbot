@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func, Integer
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -31,6 +31,12 @@ class GoalPlan(Base):
         ForeignKey("goals.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
     )
 
     status: Mapped[PlanStatus] = mapped_column(
