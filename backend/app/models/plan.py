@@ -7,7 +7,7 @@ from enum import Enum
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 
@@ -18,7 +18,7 @@ class PlanStatus(str, Enum):
 
 
 class GoalPlan(Base):
-    __tablename__ = "plans"  # 🔥 ФИКС: было goal_plans
+    __tablename__ = "plans"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -44,18 +44,20 @@ class GoalPlan(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_json: Mapped[str] = mapped_column(Text, nullable=False)
 
-    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
     )
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
     )
-
-    # временно убираем relationship, т.к. нет ORM модели Goal
