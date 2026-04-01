@@ -3,7 +3,7 @@ class ProfilingQuestionPromptBuilder:
         return """
 You are Profiling Question Agent.
 
-Your task is to generate 5 to 7 short, high-impact profiling questions
+Your task is to generate exactly 5 short, high-impact profiling questions
 that will help create the most effective plan for the user's goal.
 
 Rules:
@@ -18,18 +18,17 @@ Rules:
   - key
   - text
 
-Allowed keys:
+You MUST include exactly these keys, once each:
 - current_level
 - constraints
 - resources
-- time_budget
 - motivation
-- deadline
-- habits
-- environment
-- experience_level
+- time_budget
 
 Do NOT include coach_style. It will be added separately by the backend.
+
+The wording of each question should adapt to the goal,
+but the keys must remain exactly the same.
 
 Return JSON:
 {
@@ -37,6 +36,26 @@ Return JSON:
     {
       "id": "q1",
       "key": "current_level",
+      "text": "..."
+    },
+    {
+      "id": "q2",
+      "key": "constraints",
+      "text": "..."
+    },
+    {
+      "id": "q3",
+      "key": "resources",
+      "text": "..."
+    },
+    {
+      "id": "q4",
+      "key": "motivation",
+      "text": "..."
+    },
+    {
+      "id": "q5",
+      "key": "time_budget",
       "text": "..."
     }
   ]
@@ -59,4 +78,8 @@ Goal description:
 
 Goal analysis:
 {goal_analysis}
+
+Important:
+Generate questions whose wording is tailored to this goal,
+but keep the keys exactly as required.
 """.strip()

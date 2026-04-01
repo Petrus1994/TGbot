@@ -10,7 +10,7 @@ from app.core.exceptions import (
     ProfilingIncompleteError,
 )
 from app.db import engine
-from app.schemas.ai_plan import AIPlanResponse
+from app.schemas.ai_plan_v2 import AIPlanResponseV2
 from app.schemas.goal_generation import GoalGenerationContext
 from app.services.openai_client import OpenAIClient
 from app.services.plan_prompt_builder import PlanPromptBuilder
@@ -55,7 +55,7 @@ class PlanGenerationService:
         *,
         system_prompt: str,
         user_prompt: str,
-    ) -> AIPlanResponse:
+    ) -> AIPlanResponseV2:
         first_error: Exception | None = None
 
         try:
@@ -63,7 +63,7 @@ class PlanGenerationService:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            ai_response = AIPlanResponse.model_validate(raw_response)
+            ai_response = AIPlanResponseV2.model_validate(raw_response)
             self._validate_ai_response(ai_response)
             return ai_response
         except Exception as e:
@@ -76,7 +76,7 @@ class PlanGenerationService:
                 system_prompt=system_prompt,
                 user_prompt=retry_user_prompt,
             )
-            ai_response = AIPlanResponse.model_validate(raw_response)
+            ai_response = AIPlanResponseV2.model_validate(raw_response)
             self._validate_ai_response(ai_response)
             return ai_response
         except Exception as retry_error:
@@ -153,15 +153,24 @@ class PlanGenerationService:
             missing_fields.append("coach_style")
 
         if missing_fields:
+            print(f"❌ PLAN GENERATION MISSING FIELDS: {missing_fields}")
+            print(f"❌ CONTEXT FOR PLAN GENERATION: {context.model_dump()}")
             raise ProfilingIncompleteError(
                 f"profiling_incomplete: missing {', '.join(missing_fields)}"
             )
 
-    def _validate_ai_response(self, ai_response: AIPlanResponse) -> None:
+    def _validate_ai_response(self, ai_response: AIPlanResponseV2) -> None:
         steps = ai_response.steps
+        tasks = ai_response.tasks
 
         if not 4 <= len(steps) <= 6:
             raise AIResponseValidationError("ai_response_must_contain_4_to_6_steps")
+
+        if not 3 <= len(tasks) <= 7:
+            raise AIResponseValidationError("ai_response_must_contain_3_to_7_tasks")
+
+        if ai_response.duration_weeks < 1:
+            raise AIResponseValidationError("ai_duration_weeks_invalid")
 
         forbidden_phrases = [
             "постарайся",
@@ -192,9 +201,44 @@ class PlanGenerationService:
                         f"ai_response_contains_forbidden_phrase: {phrase}"
                     )
 
-    def _map_to_plan_payload(self, goal_id: str, ai_response: AIPlanResponse) -> dict:
+        allowed_cadence_types = {"daily", "weekly", "specific_weekdays"}
+        allowed_proof_types = {"text", "photo", "screenshot", "file"}
+
+        for task in tasks:
+            if not task.title.strip():
+                raise AIResponseValidationError("ai_task_title_empty")
+            if not task.description.strip():
+                raise AIResponseValidationError("ai_task_description_empty")
+
+            if task.cadence_type not in allowed_cadence_types:
+                raise AIResponseValidationError(
+                    f"ai_task_invalid_cadence_type: {task.cadence_type}"
+                )
+
+            if task.proof_type not in allowed_proof_types:
+                raise AIResponseValidationError(
+                    f"ai_task_invalid_proof_type: {task.proof_type}"
+                )
+
+            if task.cadence_type == "daily":
+                if task.cadence_config != {}:
+                    raise AIResponseValidationError("ai_task_daily_cadence_config_must_be_empty")
+
+            if task.cadence_type == "weekly":
+                times_per_week = task.cadence_config.get("times_per_week")
+                if not isinstance(times_per_week, int) or times_per_week < 1:
+                    raise AIResponseValidationError("ai_task_weekly_times_per_week_invalid")
+
+            if task.cadence_type == "specific_weekdays":
+                days_of_week = task.cadence_config.get("days_of_week")
+                if not isinstance(days_of_week, list) or not days_of_week:
+                    raise AIResponseValidationError("ai_task_days_of_week_invalid")
+                if not all(isinstance(day, int) and 1 <= day <= 7 for day in days_of_week):
+                    raise AIResponseValidationError("ai_task_days_of_week_out_of_range")
+
+    def _map_to_plan_payload(self, goal_id: str, ai_response: AIPlanResponseV2) -> dict:
         content = {
-            "duration_weeks": 4,
+            "duration_weeks": ai_response.duration_weeks,
             "milestones": [step.title for step in ai_response.steps],
             "steps": [
                 {
@@ -204,6 +248,19 @@ class PlanGenerationService:
                     "order": index,
                 }
                 for index, step in enumerate(ai_response.steps, start=1)
+            ],
+            "tasks": [
+                {
+                    "task_id": f"{goal_id}-task-{index}",
+                    "title": task.title,
+                    "description": task.description,
+                    "cadence_type": task.cadence_type,
+                    "cadence_config": task.cadence_config,
+                    "proof_type": task.proof_type,
+                    "proof_required": task.proof_required,
+                    "order": index,
+                }
+                for index, task in enumerate(ai_response.tasks, start=1)
             ],
         }
 
@@ -225,13 +282,25 @@ Strict requirements:
 - No markdown
 - No code fences
 - No explanations before or after JSON
-- Exactly 4 to 6 steps
-- Each step must have:
-  - title
-  - description
+- Exactly 4 to 6 strategic steps
+- Exactly 3 to 7 recurring tasks
 - Summary must be non-empty
+- duration_weeks must be >= 1
 - Steps must be concrete and actionable
+- Tasks must be realistic and repeatable
 - Do not use motivational fluff
+- Allowed cadence_type:
+  - daily
+  - weekly
+  - specific_weekdays
+- Allowed proof_type:
+  - text
+  - photo
+  - screenshot
+  - file
+- If cadence_type is daily -> cadence_config must be {{}}
+- If cadence_type is weekly -> cadence_config must include integer times_per_week
+- If cadence_type is specific_weekdays -> cadence_config must include days_of_week with integers from 1 to 7
 - Do not use phrases like:
   - try your best
   - stay motivated
@@ -246,10 +315,21 @@ Strict requirements:
 Return JSON in this exact format:
 {{
   "summary": "short strategic summary",
+  "duration_weeks": 4,
   "steps": [
     {{
       "title": "step title",
       "description": "specific concrete action"
+    }}
+  ],
+  "tasks": [
+    {{
+      "title": "task title",
+      "description": "specific recurring action",
+      "cadence_type": "daily",
+      "cadence_config": {{}},
+      "proof_type": "text",
+      "proof_required": true
     }}
   ]
 }}
