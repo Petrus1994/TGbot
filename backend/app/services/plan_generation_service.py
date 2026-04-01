@@ -58,7 +58,6 @@ class PlanGenerationService:
     ) -> AIPlanResponse:
         first_error: Exception | None = None
 
-        # attempt 1
         try:
             raw_response = await self.llm_client.generate_plan(
                 system_prompt=system_prompt,
@@ -70,7 +69,6 @@ class PlanGenerationService:
         except Exception as e:
             first_error = e
 
-        # attempt 2 with stricter retry prompt
         retry_user_prompt = self._build_retry_user_prompt(user_prompt)
 
         try:
@@ -117,7 +115,16 @@ class PlanGenerationService:
                 raise ProfilingIncompleteError("profiling_not_started")
 
             context_json = session["context_json"] or {}
-            answers = context_json.get("answers", {}) if isinstance(context_json, dict) else {}
+            if not isinstance(context_json, dict):
+                context_json = {}
+
+            profiling = context_json.get("profiling", {})
+            if not isinstance(profiling, dict):
+                profiling = {}
+
+            answers = profiling.get("answers", {})
+            if not isinstance(answers, dict):
+                answers = {}
 
             return GoalGenerationContext(
                 goal_id=str(goal["id"]),

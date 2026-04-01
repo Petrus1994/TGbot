@@ -8,23 +8,22 @@ from app.schemas.profiling import (
     ProfilingStartResponse,
     ProfilingStateResponse,
 )
+from app.services.ai_profiling_service import AIProfilingService
 from app.services.profiling_service import (
     get_current_question,
     get_profiling_state,
     start_profiling,
     submit_profiling_answer,
 )
-from app.services.ai_profiling_service import AIProfilingService
 
 router = APIRouter(prefix="/goals/{goal_id}/profiling", tags=["profiling"])
 
-# AI profiling сервис
 ai_profiling_service = AIProfilingService()
 
 
 @router.post("/start", response_model=ProfilingStartResponse)
-def start_profiling_endpoint(goal_id: str):
-    return start_profiling(goal_id)
+async def start_profiling_endpoint(goal_id: str):
+    return await start_profiling(goal_id)
 
 
 @router.get("/current-question", response_model=ProfilingQuestionResponse)
@@ -42,19 +41,17 @@ def get_profiling_state_endpoint(goal_id: str):
     return get_profiling_state(goal_id)
 
 
-# 🔥 Новый endpoint для AI profiling
 @router.post("/ai-questions")
 async def generate_ai_profiling_questions(goal_id: str):
     """
     Генерирует динамические profiling вопросы через AI.
-    НЕ заменяет основной profiling flow.
+    Полезно для отладки и сравнения, но основной flow уже использует AI внутри /start.
     """
-
     with engine.begin() as connection:
         goal = connection.execute(
             text(
                 """
-                SELECT id, title
+                SELECT id, title, description
                 FROM goals
                 WHERE id = :goal_id
                 """
