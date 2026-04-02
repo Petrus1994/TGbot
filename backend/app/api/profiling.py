@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import text
 
 from app.db import engine
@@ -16,37 +16,120 @@ from app.services.profiling_service import (
     submit_profiling_answer,
 )
 
-router = APIRouter(prefix="/goals/{goal_id}/profiling", tags=["profiling"])
+router = APIRouter(
+    prefix="/goals/{goal_id}/profiling",
+    tags=["profiling"],
+)
 
 ai_profiling_service = AIProfilingService()
 
 
-@router.post("/start", response_model=ProfilingStartResponse)
+# ======================
+# START
+# ======================
+@router.post(
+    "/start",
+    response_model=ProfilingStartResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Start profiling flow for a goal",
+)
 async def start_profiling_endpoint(goal_id: str):
-    return await start_profiling(goal_id)
+    try:
+        return await start_profiling(goal_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"profiling_start_failed: {str(e)}",
+        ) from e
 
 
-@router.get("/current-question", response_model=ProfilingQuestionResponse)
+# ======================
+# CURRENT QUESTION
+# ======================
+@router.get(
+    "/current-question",
+    response_model=ProfilingQuestionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get current profiling question",
+)
 def get_current_question_endpoint(goal_id: str):
-    return get_current_question(goal_id)
+    try:
+        return get_current_question(goal_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"get_current_question_failed: {str(e)}",
+        ) from e
 
 
-@router.post("/answer", response_model=ProfilingStateResponse)
-def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswerRequest):
-    return submit_profiling_answer(goal_id, payload.answer)
+# ======================
+# ANSWER (UPDATED TO ASYNC)
+# ======================
+@router.post(
+    "/answer",
+    response_model=ProfilingStateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Submit answer for current profiling question",
+)
+async def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswerRequest):
+    """
+    Ключевой endpoint profiling v2.
+
+    Поведение:
+    - вызывает AI judge
+    - если ответ слабый → НЕ двигает дальше
+    - если ответ хороший → сохраняет и идёт дальше
+
+    ВАЖНО:
+    Бот должен проверять:
+    - needs_follow_up
+    """
+
+    try:
+        return await submit_profiling_answer(goal_id, payload.answer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"submit_profiling_answer_failed: {str(e)}",
+        ) from e
 
 
-@router.get("/state", response_model=ProfilingStateResponse)
+# ======================
+# STATE
+# ======================
+@router.get(
+    "/state",
+    response_model=ProfilingStateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get current profiling state",
+)
 def get_profiling_state_endpoint(goal_id: str):
-    return get_profiling_state(goal_id)
+    try:
+        return get_profiling_state(goal_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"get_profiling_state_failed: {str(e)}",
+        ) from e
 
 
-@router.post("/ai-questions")
+# ======================
+# DEBUG: AI QUESTIONS
+# ======================
+@router.post(
+    "/ai-questions",
+    status_code=status.HTTP_200_OK,
+    summary="Generate AI profiling questions for debugging",
+)
 async def generate_ai_profiling_questions(goal_id: str):
-    """
-    Генерирует динамические profiling вопросы через AI.
-    Полезно для отладки и сравнения, но основной flow уже использует AI внутри /start.
-    """
     with engine.begin() as connection:
         goal = connection.execute(
             text(
@@ -60,13 +143,23 @@ async def generate_ai_profiling_questions(goal_id: str):
         ).mappings().first()
 
     if not goal:
-        raise HTTPException(status_code=404, detail="goal_not_found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="goal_not_found",
+        )
 
     try:
         result = await ai_profiling_service.generate_questions(goal["title"])
-        return result
+        return {
+            "goal_id": goal_id,
+            "goal_title": goal["title"],
+            "goal_description": goal.get("description"),
+            "questions": result,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"ai_profiling_failed: {str(e)}",
         ) from e
