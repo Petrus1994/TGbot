@@ -15,6 +15,14 @@ dynamic_profiling_service = DynamicProfilingService()
 profiling_quality_service = ProfilingQualityService()
 profiling_summary_service = ProfilingSummaryService()
 
+REQUIRED_PROFILING_KEYS = (
+    "current_level",
+    "constraints",
+    "resources",
+    "motivation",
+    "coach_style",
+)
+
 
 def _get_goal(connection, goal_id: str):
     goal = connection.execute(
@@ -106,6 +114,25 @@ def _find_question_by_key(questions: list[dict], question_key: str | None) -> di
             return question
 
     return None
+
+
+def _has_required_answers(answers: dict[str, str]) -> bool:
+    for key in REQUIRED_PROFILING_KEYS:
+        value = answers.get(key)
+        if not value or not str(value).strip():
+            return False
+    return True
+
+
+def _get_missing_required_keys(answers: dict[str, str]) -> list[str]:
+    missing_keys: list[str] = []
+
+    for key in REQUIRED_PROFILING_KEYS:
+        value = answers.get(key)
+        if not value or not str(value).strip():
+            missing_keys.append(key)
+
+    return missing_keys
 
 
 def _build_state_response(goal_id, state, substate, context, extra=None):
@@ -304,6 +331,69 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
             asked_question_keys=asked_question_keys,
             skipped_question_keys=skipped_question_keys,
         )
+
+        has_required_answers = _has_required_answers(answers)
+
+        if next_step["is_completed"] and not has_required_answers:
+            missing_keys = _get_missing_required_keys(answers)
+
+            forced_question = None
+            for missing_key in missing_keys:
+                candidate = _find_question_by_key(questions, missing_key)
+                if candidate:
+                    forced_question = candidate
+                    break
+
+            if not forced_question:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"required_profiling_questions_missing_in_bank: {missing_keys}",
+                )
+
+            profiling.update(
+                {
+                    "answers": answers,
+                    "asked_question_keys": asked_question_keys,
+                    "skipped_question_keys": skipped_question_keys,
+                    "current_question_key": forced_question["key"],
+                    "is_completed": False,
+                    "questions_answered_count": len(answers),
+                    "questions_total_count": len(questions),
+                    "summary": None,
+                }
+            )
+            context["profiling"] = profiling
+
+            connection.execute(
+                text(
+                    """
+                    UPDATE goal_sessions
+                    SET state = :state,
+                        substate = :substate,
+                        context_json = CAST(:context_json AS jsonb),
+                        updated_at = NOW()
+                    WHERE goal_id = :goal_id
+                    """
+                ),
+                {
+                    "goal_id": goal_id,
+                    "state": "awaiting_profiling_answer",
+                    "substate": forced_question["key"],
+                    "context_json": json.dumps(context, ensure_ascii=False),
+                },
+            )
+
+            return _build_state_response(
+                goal_id=goal_id,
+                state="awaiting_profiling_answer",
+                substate=forced_question["key"],
+                context=context,
+                extra={
+                    "answer_accepted": True,
+                    "needs_follow_up": False,
+                    "feedback_message": "Нужно уточнить ещё несколько важных моментов, чтобы собрать полный план.",
+                },
+            )
 
         if next_step["is_completed"]:
             summary = await profiling_summary_service.build_summary(
