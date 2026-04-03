@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func, Integer
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -15,6 +15,7 @@ from app.db import Base
 class PlanStatus(str, Enum):
     draft = "draft"
     accepted = "accepted"
+    archived = "archived"
 
 
 class GoalPlan(Base):
