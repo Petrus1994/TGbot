@@ -8,10 +8,12 @@ from sqlalchemy import text
 from app.db import engine
 from app.services.dynamic_profiling_service import DynamicProfilingService
 from app.services.profiling_quality_service import ProfilingQualityService
+from app.services.profiling_summary_service import ProfilingSummaryService
 
 
 dynamic_profiling_service = DynamicProfilingService()
 profiling_quality_service = ProfilingQualityService()
+profiling_summary_service = ProfilingSummaryService()
 
 
 def _get_goal(connection, goal_id: str):
@@ -98,9 +100,11 @@ def _get_current_question_key(context):
 def _find_question_by_key(questions: list[dict], question_key: str | None) -> dict | None:
     if not question_key:
         return None
+
     for question in questions:
         if question.get("key") == question_key:
             return question
+
     return None
 
 
@@ -110,6 +114,7 @@ def _build_state_response(goal_id, state, substate, context, extra=None):
     answers = _get_answers(context)
     current_question_key = _get_current_question_key(context)
     current_question = _find_question_by_key(questions, current_question_key)
+    profiling_summary = profiling.get("summary")
 
     is_completed = bool(profiling.get("is_completed", False))
 
@@ -124,6 +129,7 @@ def _build_state_response(goal_id, state, substate, context, extra=None):
         "example_answer": current_question.get("example_answer") if current_question else None,
         "is_completed": is_completed,
         "answers": answers,
+        "profiling_summary": profiling_summary,
     }
 
     if extra:
@@ -156,6 +162,7 @@ async def start_profiling(goal_id: str) -> dict:
         profiling["asked_question_keys"] = []
         profiling["skipped_question_keys"] = []
         profiling["answers"] = {}
+        profiling["summary"] = None
         profiling["is_completed"] = False
         profiling["questions_total_count"] = len(questions)
         profiling["questions_answered_count"] = 0
@@ -299,6 +306,12 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
         )
 
         if next_step["is_completed"]:
+            summary = await profiling_summary_service.build_summary(
+                goal_title=goal["title"],
+                goal_description=goal.get("description"),
+                answers=answers,
+            )
+
             profiling.update(
                 {
                     "answers": answers,
@@ -308,6 +321,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                     "is_completed": True,
                     "questions_answered_count": len(answers),
                     "questions_total_count": len(questions),
+                    "summary": summary,
                 }
             )
             context["profiling"] = profiling
@@ -369,6 +383,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 "is_completed": False,
                 "questions_answered_count": len(answers),
                 "questions_total_count": len(questions),
+                "summary": None,
             }
         )
         context["profiling"] = profiling

@@ -13,13 +13,18 @@ You are Planner Agent.
 Your job is to create a concrete execution plan for the user's goal.
 
 Core objective:
-- Build a realistic, structured, actionable plan that keeps the user focused on the goal.
-- The plan must prioritize the goal above distractions or irrelevant details.
-- The plan must include both strategic steps and repeatable execution tasks.
+- Build a realistic, structured, actionable plan
+- Use structured profiling data as the PRIMARY source of truth
+- Ignore noise and irrelevant details
+
+CRITICAL:
+- You are given structured profiling summary
+- It is already cleaned and normalized
+- ALWAYS prioritize it over raw or vague data
 
 Rules:
 1. Always stay aligned with the user's goal
-2. Ignore irrelevant or off-topic details
+2. Use ONLY relevant information
 3. Generate exactly 4 to 6 strategic steps
 4. Each step must contain a specific action
 5. Do NOT write abstract advice
@@ -34,20 +39,21 @@ Rules:
    - "не сдавайся"
    - "верь в себя"
 7. Steps must be sequential and realistic
-8. Also generate repeatable tasks that can later be used to build daily checklists
-9. Consider:
-   - current level
+8. Consider:
+   - current state
    - constraints
    - resources
    - motivation
+   - obstacles
+   - time budget
    - coaching style
-10. Output must be strictly valid JSON only
-11. Do not add markdown
-12. Do not add explanations outside JSON
+9. Output must be strictly valid JSON only
+10. Do not add markdown
+11. Do not add explanations outside JSON
 
 Task generation rules:
 - Generate 3 to 7 repeatable tasks
-- Each task must be concrete
+- Each task must be concrete and realistic
 - Each task must include:
   - title
   - description
@@ -55,27 +61,17 @@ Task generation rules:
   - cadence_config
   - proof_type
   - proof_required
-- Allowed cadence_type values:
-  - daily
-  - specific_weekdays
-  - weekly
-- If cadence_type is:
-  - daily -> cadence_config must be {{}}
-  - weekly -> cadence_config must be {{"times_per_week": <number>}}
-  - specific_weekdays -> cadence_config must be {{"days_of_week": [1,2,3]}}
-- days_of_week format:
-  - 1 = Monday
-  - 2 = Tuesday
-  - 3 = Wednesday
-  - 4 = Thursday
-  - 5 = Friday
-  - 6 = Saturday
-  - 7 = Sunday
-- Allowed proof_type values:
-  - text
-  - photo
-  - screenshot
-  - file
+
+Allowed cadence_type:
+- daily
+- weekly
+- specific_weekdays
+
+Allowed proof_type:
+- text
+- photo
+- screenshot
+- file
 
 {coach_style_instruction}
 
@@ -105,27 +101,32 @@ Return JSON in exactly this structure:
 
     def build_user_prompt(self, context: GoalGenerationContext) -> str:
         return f"""
-Generate a goal execution plan using the following context.
+Generate a goal execution plan using structured profiling data.
 
 Goal:
 - title: {context.goal_title}
 - description: {context.goal_description or "Not provided"}
 
-Profiling:
-- current_level: {context.current_level or "Not provided"}
+Structured profiling summary:
+- current_state: {context.current_level or "Not provided"}
 - constraints: {context.constraints or "Not provided"}
 - resources: {context.resources or "Not provided"}
 - motivation: {context.motivation or "Not provided"}
 - coach_style: {context.coach_style or "Not provided"}
+
+IMPORTANT:
+- This data is already cleaned and structured
+- Do NOT assume missing things unless critical
+- Do NOT hallucinate extra context
 
 Requirements:
 - 4 to 6 strategic steps
 - 3 to 7 recurring tasks
 - each step must be actionable
 - each step must move the user closer to the goal
-- tasks must be realistic and suitable for daily or weekly execution
+- tasks must be realistic and executable
 - avoid generic self-help language
-- focus on execution, prioritization, and realism
+- focus on execution, prioritization, and constraints
 - summary should be concise and strategic
 """.strip()
 
@@ -192,12 +193,6 @@ Return JSON:
   "next_cycle_focus": "...",
   "coach_message": "Message to user"
 }}
-
-Coach message style:
-- Strategic
-- Honest
-- Slightly tougher than executor
-- Focused on correction and direction
 """.strip()
 
     def _build_coach_style_instruction(self, coach_style: str | None) -> str:
@@ -217,7 +212,6 @@ Coaching style:
 - aggressive
 - direct and demanding
 - prioritize discipline, deadlines, accountability, and measurable progress
-- avoid softness and emotional padding
 """.strip()
 
         if normalized == "balanced":

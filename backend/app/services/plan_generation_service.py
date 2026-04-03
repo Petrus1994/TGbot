@@ -122,20 +122,55 @@ class PlanGenerationService:
             if not isinstance(profiling, dict):
                 profiling = {}
 
+            profiling_summary = profiling.get("summary", {})
+            if not isinstance(profiling_summary, dict):
+                profiling_summary = {}
+
             answers = profiling.get("answers", {})
             if not isinstance(answers, dict):
                 answers = {}
+
+            current_level = self._pick_first_non_empty(
+                profiling_summary.get("current_state"),
+                profiling_summary.get("current_level"),
+                answers.get("current_state"),
+                answers.get("current_level"),
+            )
+            constraints = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("constraints"),
+                    answers.get("constraints"),
+                )
+            )
+            resources = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("resources"),
+                    answers.get("resources"),
+                )
+            )
+            motivation = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("motivation"),
+                    answers.get("motivation"),
+                )
+            )
+            coach_style = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("coach_style"),
+                    answers.get("coach_style"),
+                )
+            )
 
             return GoalGenerationContext(
                 goal_id=str(goal["id"]),
                 user_id=str(goal["user_id"]),
                 goal_title=goal.get("title") or "Untitled goal",
                 goal_description=goal.get("description"),
-                current_level=answers.get("current_level"),
-                constraints=answers.get("constraints"),
-                resources=answers.get("resources"),
-                motivation=answers.get("motivation"),
-                coach_style=answers.get("coach_style"),
+                current_level=current_level,
+                constraints=constraints,
+                resources=resources,
+                motivation=motivation,
+                coach_style=coach_style,
             )
 
     def _validate_context(self, context: GoalGenerationContext) -> None:
@@ -337,6 +372,33 @@ Return JSON in this exact format:
 Original task:
 {original_user_prompt}
 """.strip()
+
+    def _pick_first_non_empty(self, *values):
+        for value in values:
+            normalized = self._normalize_text_field(value)
+            if normalized:
+                return normalized
+        return None
+
+    def _normalize_text_field(self, value):
+        if value is None:
+            return None
+
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return ", ".join(items) if items else None
+
+        if isinstance(value, dict):
+            parts = []
+            for key, item in value.items():
+                key_str = str(key).strip()
+                item_str = str(item).strip()
+                if key_str and item_str:
+                    parts.append(f"{key_str}: {item_str}")
+            return "; ".join(parts) if parts else None
+
+        value = str(value).strip()
+        return value or None
 
     async def _fallback_stub(self, goal_id: str) -> dict:
         raise AIPlanGenerationError("fallback_should_be_handled_in_route")
