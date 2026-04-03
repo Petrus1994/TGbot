@@ -10,6 +10,10 @@ class ProfilingStartResponse(BaseModel):
     current_question_text: str
 
     example_answer: str | None = None
+    question_type: str | None = "text"
+    suggested_options: list[str] | None = None
+    allow_free_text: bool = True
+    follow_up_attempts: int = 0
 
     questions_answered_count: int
     questions_total_count: int
@@ -24,6 +28,10 @@ class ProfilingQuestionResponse(BaseModel):
     current_question_text: str | None = None
 
     example_answer: str | None = None
+    question_type: str | None = "text"
+    suggested_options: list[str] | None = None
+    allow_free_text: bool = True
+    follow_up_attempts: int = 0
 
     questions_answered_count: int
     questions_total_count: int
@@ -48,6 +56,10 @@ class ProfilingStateResponse(BaseModel):
     current_question_text: str | None = None
 
     example_answer: str | None = None
+    question_type: str | None = "text"
+    suggested_options: list[str] | None = None
+    allow_free_text: bool = True
+    follow_up_attempts: int = 0
 
     is_completed: bool
 

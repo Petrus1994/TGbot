@@ -24,9 +24,6 @@ router = APIRouter(
 ai_profiling_service = AIProfilingService()
 
 
-# ======================
-# START
-# ======================
 @router.post(
     "/start",
     response_model=ProfilingStartResponse,
@@ -34,6 +31,15 @@ ai_profiling_service = AIProfilingService()
     summary="Start profiling flow for a goal",
 )
 async def start_profiling_endpoint(goal_id: str):
+    """
+    Инициализирует profiling flow.
+
+    Возвращает:
+    - первый вопрос
+    - тип вопроса
+    - suggested options, если они есть
+    - пример ответа, если он релевантен
+    """
     try:
         return await start_profiling(goal_id)
     except HTTPException:
@@ -45,9 +51,6 @@ async def start_profiling_endpoint(goal_id: str):
         ) from e
 
 
-# ======================
-# CURRENT QUESTION
-# ======================
 @router.get(
     "/current-question",
     response_model=ProfilingQuestionResponse,
@@ -55,6 +58,18 @@ async def start_profiling_endpoint(goal_id: str):
     summary="Get current profiling question",
 )
 def get_current_question_endpoint(goal_id: str):
+    """
+    Возвращает текущий активный вопрос profiling.
+
+    Может включать:
+    - current_question_key
+    - current_question_text
+    - example_answer
+    - question_type
+    - suggested_options
+    - allow_free_text
+    - follow_up_attempts
+    """
     try:
         return get_current_question(goal_id)
     except HTTPException:
@@ -66,9 +81,6 @@ def get_current_question_endpoint(goal_id: str):
         ) from e
 
 
-# ======================
-# ANSWER (UPDATED TO ASYNC)
-# ======================
 @router.post(
     "/answer",
     response_model=ProfilingStateResponse,
@@ -77,18 +89,26 @@ def get_current_question_endpoint(goal_id: str):
 )
 async def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswerRequest):
     """
-    Ключевой endpoint profiling v2.
+    Принимает ответ пользователя на текущий вопрос profiling.
 
     Поведение:
-    - вызывает AI judge
-    - если ответ слабый → НЕ двигает дальше
-    - если ответ хороший → сохраняет и идёт дальше
+    - если ответ слабый -> needs_follow_up = true
+    - если ответ хороший -> переход к следующему вопросу
+    - если собраны обязательные поля -> profiling завершается
+    - при завершении возвращается profiling_summary
 
-    ВАЖНО:
-    Бот должен проверять:
+    Фронт должен учитывать:
+    - answer_accepted
     - needs_follow_up
+    - feedback_message
+    - follow_up_question
+    - example_answer
+    - question_type
+    - suggested_options
+    - allow_free_text
+    - follow_up_attempts
+    - profiling_summary
     """
-
     try:
         return await submit_profiling_answer(goal_id, payload.answer)
     except HTTPException:
@@ -100,9 +120,6 @@ async def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswe
         ) from e
 
 
-# ======================
-# STATE
-# ======================
 @router.get(
     "/state",
     response_model=ProfilingStateResponse,
@@ -110,6 +127,17 @@ async def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswe
     summary="Get current profiling state",
 )
 def get_profiling_state_endpoint(goal_id: str):
+    """
+    Возвращает текущее состояние profiling.
+
+    Используется фронтом, чтобы понять:
+    - profiling завершён или нет
+    - какой сейчас вопрос
+    - нужен ли follow-up
+    - есть ли suggested options
+    - сколько уже было follow-up попыток
+    - готов ли profiling_summary
+    """
     try:
         return get_profiling_state(goal_id)
     except HTTPException:
@@ -121,15 +149,21 @@ def get_profiling_state_endpoint(goal_id: str):
         ) from e
 
 
-# ======================
-# DEBUG: AI QUESTIONS
-# ======================
 @router.post(
     "/ai-questions",
     status_code=status.HTTP_200_OK,
     summary="Generate AI profiling questions for debugging",
 )
 async def generate_ai_profiling_questions(goal_id: str):
+    """
+    Вспомогательный debug endpoint для генерации profiling questions через AI.
+
+    Основной flow profiling:
+    - /start
+    - /current-question
+    - /answer
+    - /state
+    """
     with engine.begin() as connection:
         goal = connection.execute(
             text(

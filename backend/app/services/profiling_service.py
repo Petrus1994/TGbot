@@ -23,6 +23,8 @@ REQUIRED_PROFILING_KEYS = (
     "coach_style",
 )
 
+MAX_FOLLOW_UP_ATTEMPTS_PER_QUESTION = 2
+
 
 def _get_goal(connection, goal_id: str):
     goal = connection.execute(
@@ -99,6 +101,20 @@ def _get_skipped_question_keys(context):
     return [str(x) for x in keys]
 
 
+def _get_follow_up_attempts(context):
+    profiling = _get_profiling_block(context)
+    attempts = profiling.get("follow_up_attempts", {})
+    if not isinstance(attempts, dict):
+        return {}
+    normalized = {}
+    for key, value in attempts.items():
+        try:
+            normalized[str(key)] = int(value)
+        except Exception:
+            normalized[str(key)] = 0
+    return normalized
+
+
 def _get_current_question_key(context):
     profiling = _get_profiling_block(context)
     value = profiling.get("current_question_key")
@@ -135,15 +151,43 @@ def _get_missing_required_keys(answers: dict[str, str]) -> list[str]:
     return missing_keys
 
 
+def _extract_question_meta(question: dict | None) -> dict:
+    if not question:
+        return {
+            "question_type": "text",
+            "suggested_options": None,
+            "allow_free_text": True,
+        }
+
+    question_type = str(question.get("question_type") or "text").strip()
+    suggested_options = question.get("suggested_options")
+    if not isinstance(suggested_options, list):
+        suggested_options = None
+    else:
+        suggested_options = [str(option).strip() for option in suggested_options if str(option).strip()] or None
+
+    allow_free_text = question.get("allow_free_text")
+    if not isinstance(allow_free_text, bool):
+        allow_free_text = True
+
+    return {
+        "question_type": question_type,
+        "suggested_options": suggested_options,
+        "allow_free_text": allow_free_text,
+    }
+
+
 def _build_state_response(goal_id, state, substate, context, extra=None):
     profiling = _get_profiling_block(context)
     questions = _get_questions(context)
     answers = _get_answers(context)
+    follow_up_attempts = _get_follow_up_attempts(context)
     current_question_key = _get_current_question_key(context)
     current_question = _find_question_by_key(questions, current_question_key)
     profiling_summary = profiling.get("summary")
 
     is_completed = bool(profiling.get("is_completed", False))
+    question_meta = _extract_question_meta(current_question)
 
     response = {
         "goal_id": goal_id,
@@ -154,6 +198,10 @@ def _build_state_response(goal_id, state, substate, context, extra=None):
         "current_question_key": current_question.get("key") if current_question else None,
         "current_question_text": current_question.get("text") if current_question else None,
         "example_answer": current_question.get("example_answer") if current_question else None,
+        "question_type": question_meta["question_type"],
+        "suggested_options": question_meta["suggested_options"],
+        "allow_free_text": question_meta["allow_free_text"],
+        "follow_up_attempts": follow_up_attempts.get(current_question_key or "", 0),
         "is_completed": is_completed,
         "answers": answers,
         "profiling_summary": profiling_summary,
@@ -188,6 +236,7 @@ async def start_profiling(goal_id: str) -> dict:
         profiling["current_question_key"] = first_question["key"]
         profiling["asked_question_keys"] = []
         profiling["skipped_question_keys"] = []
+        profiling["follow_up_attempts"] = {}
         profiling["answers"] = {}
         profiling["summary"] = None
         profiling["is_completed"] = False
@@ -265,6 +314,10 @@ def get_current_question(goal_id: str) -> dict:
             "current_question_key": result["current_question_key"],
             "current_question_text": result["current_question_text"],
             "example_answer": result.get("example_answer"),
+            "question_type": result.get("question_type"),
+            "suggested_options": result.get("suggested_options"),
+            "allow_free_text": result.get("allow_free_text"),
+            "follow_up_attempts": result.get("follow_up_attempts"),
             "questions_answered_count": result["questions_answered_count"],
             "questions_total_count": result["questions_total_count"],
             "is_completed": result["is_completed"],
@@ -286,6 +339,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
         answers = _get_answers(context)
         asked_question_keys = _get_asked_question_keys(context)
         skipped_question_keys = _get_skipped_question_keys(context)
+        follow_up_attempts = _get_follow_up_attempts(context)
         current_question_key = _get_current_question_key(context)
 
         if profiling.get("is_completed"):
@@ -304,6 +358,47 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
         )
 
         if not evaluation["accepted"]:
+            current_attempts = follow_up_attempts.get(current_question["key"], 0) + 1
+            follow_up_attempts[current_question["key"]] = current_attempts
+
+            profiling["follow_up_attempts"] = follow_up_attempts
+            context["profiling"] = profiling
+
+            connection.execute(
+                text(
+                    """
+                    UPDATE goal_sessions
+                    SET state = :state,
+                        substate = :substate,
+                        context_json = CAST(:context_json AS jsonb),
+                        updated_at = NOW()
+                    WHERE goal_id = :goal_id
+                    """
+                ),
+                {
+                    "goal_id": goal_id,
+                    "state": session["state"],
+                    "substate": session["substate"],
+                    "context_json": json.dumps(context, ensure_ascii=False),
+                },
+            )
+
+            feedback_message = evaluation.get("feedback_message")
+            follow_up_question = evaluation.get("follow_up_question")
+            suggested_options = evaluation.get("suggested_options")
+
+            if current_attempts >= MAX_FOLLOW_UP_ATTEMPTS_PER_QUESTION:
+                if not suggested_options:
+                    suggested_options = current_question.get("suggested_options")
+
+                feedback_message = (
+                    "Давай упростим. Можно выбрать самый близкий вариант или дать примерный ответ."
+                )
+                follow_up_question = (
+                    follow_up_question
+                    or "Выбери самый близкий вариант или ответь примерно, без идеальной точности."
+                )
+
             return _build_state_response(
                 goal_id,
                 session["state"],
@@ -312,9 +407,11 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 extra={
                     "answer_accepted": False,
                     "needs_follow_up": True,
-                    "feedback_message": evaluation.get("feedback_message"),
-                    "follow_up_question": evaluation.get("follow_up_question"),
+                    "feedback_message": feedback_message,
+                    "follow_up_question": follow_up_question,
                     "example_answer": evaluation.get("example_answer"),
+                    "suggested_options": suggested_options,
+                    "follow_up_attempts": current_attempts,
                 },
             )
 
@@ -322,6 +419,8 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
 
         if current_question["key"] not in asked_question_keys:
             asked_question_keys.append(current_question["key"])
+
+        follow_up_attempts[current_question["key"]] = 0
 
         next_step = await dynamic_profiling_service.select_next_step(
             goal_title=goal["title"],
@@ -355,6 +454,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                     "answers": answers,
                     "asked_question_keys": asked_question_keys,
                     "skipped_question_keys": skipped_question_keys,
+                    "follow_up_attempts": follow_up_attempts,
                     "current_question_key": forced_question["key"],
                     "is_completed": False,
                     "questions_answered_count": len(answers),
@@ -407,6 +507,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                     "answers": answers,
                     "asked_question_keys": asked_question_keys,
                     "skipped_question_keys": skipped_question_keys,
+                    "follow_up_attempts": follow_up_attempts,
                     "current_question_key": None,
                     "is_completed": True,
                     "questions_answered_count": len(answers),
@@ -469,6 +570,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 "answers": answers,
                 "asked_question_keys": asked_question_keys,
                 "skipped_question_keys": skipped_question_keys,
+                "follow_up_attempts": follow_up_attempts,
                 "current_question_key": next_question["key"],
                 "is_completed": False,
                 "questions_answered_count": len(answers),
