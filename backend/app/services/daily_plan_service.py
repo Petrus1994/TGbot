@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -54,9 +54,9 @@ def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskRespons
 
     return [
         DailyTaskResponse(
-            id=row["id"],
-            daily_plan_id=row["daily_plan_id"],
-            goal_id=row["goal_id"],
+            id=str(row["id"]),
+            daily_plan_id=str(row["daily_plan_id"]),
+            goal_id=str(row["goal_id"]),
             title=row["title"],
             description=row["description"],
             instructions=row["instructions"],
@@ -73,11 +73,11 @@ def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskRespons
 
 
 def _build_daily_plan_response(conn, row) -> DailyPlanResponse:
-    tasks = _get_tasks_for_daily_plan(conn, row["id"])
+    tasks = _get_tasks_for_daily_plan(conn, str(row["id"]))
 
     return DailyPlanResponse(
-        id=row["id"],
-        goal_id=row["goal_id"],
+        id=str(row["id"]),
+        goal_id=str(row["goal_id"]),
         day_number=row["day_number"],
         planned_date=_parse_date(row["planned_date"]),
         focus=row["focus"],
@@ -164,8 +164,6 @@ def create_daily_plans_for_goal(
             """
         )
 
-        created_ids: list[str] = []
-
         for day in generated_days:
             daily_plan_row = conn.execute(
                 insert_daily_plan_query,
@@ -179,8 +177,7 @@ def create_daily_plans_for_goal(
                 },
             ).mappings().one()
 
-            daily_plan_id = daily_plan_row["id"]
-            created_ids.append(daily_plan_id)
+            daily_plan_id = str(daily_plan_row["id"])
 
             for index, task in enumerate(day.tasks, start=1):
                 conn.execute(
@@ -427,7 +424,7 @@ def update_daily_task_status(task_id: str, status: DailyTaskStatus) -> DailyPlan
         if not task_row:
             return None
 
-        completed_at = datetime.utcnow() if status == DailyTaskStatus.done else None
+        completed_at = datetime.now(timezone.utc) if status == DailyTaskStatus.done else None
 
         conn.execute(
             text(
@@ -446,7 +443,7 @@ def update_daily_task_status(task_id: str, status: DailyTaskStatus) -> DailyPlan
             },
         )
 
-    return recalculate_daily_plan_status(task_row["daily_plan_id"])
+    return recalculate_daily_plan_status(str(task_row["daily_plan_id"]))
 
 
 def update_daily_plan_status(
@@ -475,7 +472,7 @@ def update_daily_plan_status(
                 if status == DailyPlanStatus.done
                 else DailyTaskStatus.skipped.value
             )
-            completed_at = datetime.utcnow() if status == DailyPlanStatus.done else None
+            completed_at = datetime.now(timezone.utc) if status == DailyPlanStatus.done else None
 
             conn.execute(
                 text(

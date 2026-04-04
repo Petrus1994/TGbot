@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import re
 
 from sqlalchemy import text
 
@@ -34,12 +35,28 @@ class PlanGenerationService:
         context = await self._load_context(goal_id)
         self._validate_context(context)
 
+        response_language = self._infer_response_language(context)
+
         system_prompt = self.prompt_builder.build_system_prompt(context)
         user_prompt = self.prompt_builder.build_user_prompt(context)
+        user_prompt = f"""{user_prompt}
+
+IMPORTANT LANGUAGE RULE:
+Return all user-facing content strictly in {response_language}.
+This includes:
+- summary
+- step titles
+- step descriptions
+- task titles
+- task descriptions
+
+Do not mix languages.
+"""
 
         ai_response = await self._generate_with_retry(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            response_language=response_language,
         )
 
         plan_payload = self._map_to_plan_payload(goal_id=goal_id, ai_response=ai_response)
@@ -57,6 +74,7 @@ class PlanGenerationService:
         *,
         system_prompt: str,
         user_prompt: str,
+        response_language: str,
     ) -> AIPlanResponseV2:
         first_error: Exception | None = None
 
@@ -71,7 +89,10 @@ class PlanGenerationService:
         except Exception as e:
             first_error = e
 
-        retry_user_prompt = self._build_retry_user_prompt(user_prompt)
+        retry_user_prompt = self._build_retry_user_prompt(
+            original_user_prompt=user_prompt,
+            response_language=response_language,
+        )
 
         try:
             raw_response = await self.llm_client.generate_plan(
@@ -402,7 +423,24 @@ class PlanGenerationService:
         }
         return presets[normalized]
 
-    def _build_retry_user_prompt(self, original_user_prompt: str) -> str:
+    def _infer_response_language(self, context: GoalGenerationContext) -> str:
+        text_parts = [
+            context.goal_title,
+            context.goal_description,
+            context.current_level,
+            context.constraints,
+            context.resources,
+            context.motivation,
+            context.coach_style,
+        ]
+        combined = " ".join(part for part in text_parts if part)
+
+        if re.search(r"[А-Яа-яЁё]", combined):
+            return "Russian"
+
+        return "English"
+
+    def _build_retry_user_prompt(self, original_user_prompt: str, response_language: str) -> str:
         return f"""
 The previous answer was invalid.
 
@@ -420,6 +458,8 @@ Strict requirements:
 - Steps must be concrete and actionable
 - Tasks must be realistic and repeatable
 - Do not use motivational fluff
+- All user-facing content must be strictly in {response_language}
+- Do not mix languages
 - Allowed cadence_type:
   - daily
   - weekly
