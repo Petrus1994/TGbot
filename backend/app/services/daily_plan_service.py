@@ -6,13 +6,13 @@ from typing import Any
 from sqlalchemy import text
 
 from app.db import engine
+from app.models.daily_plan import DailyPlanStatus
+from app.models.daily_task import DailyTaskStatus
 from app.schemas.daily_plan import (
     DailyPlanResponse,
     DailyTaskResponse,
     GeneratedDailyPlan,
 )
-from app.models.daily_plan import DailyPlanStatus
-from app.models.daily_task import DailyTaskStatus
 
 
 def _parse_date(value: Any) -> date | None:
@@ -78,7 +78,7 @@ def _build_daily_plan_response(conn, row) -> DailyPlanResponse:
     return DailyPlanResponse(
         id=str(row["id"]),
         goal_id=str(row["goal_id"]),
-        day_number=row["day_number"],
+        day_number=row["day_number"] or 1,
         planned_date=_parse_date(row["planned_date"]),
         focus=row["focus"],
         summary=row["summary"],
@@ -166,6 +166,8 @@ def create_daily_plans_for_goal(
 
         for day in generated_days:
             parsed_planned_date = _parse_date(day.planned_date)
+            if not parsed_planned_date:
+                parsed_planned_date = date.today()
 
             daily_plan_row = conn.execute(
                 insert_daily_plan_query,
@@ -296,7 +298,8 @@ def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanRes
                     created_at
                 FROM daily_plans
                 WHERE goal_id = :goal_id
-                  AND planned_date = :today_date
+                  AND planned_date <= :today_date
+                ORDER BY day_number ASC
                 LIMIT 1
                 """
             ),
