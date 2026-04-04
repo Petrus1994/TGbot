@@ -309,7 +309,8 @@ Do not mix languages.
             for index, task in enumerate(ai_response.tasks, start=1)
         ]
 
-        days = self._build_daily_days(goal_id=goal_id, ai_response=ai_response)
+        days = self._build_daily_days(ai_response=ai_response)
+        print(f"🔥 GENERATED DAYS COUNT: {len(days)}")
 
         content = {
             "duration_weeks": ai_response.duration_weeks,
@@ -334,7 +335,7 @@ Do not mix languages.
             "status": "draft",
         }
 
-    def _build_daily_days(self, goal_id: str, ai_response: AIPlanResponseV2) -> list[dict]:
+    def _build_daily_days(self, ai_response: AIPlanResponseV2) -> list[dict]:
         total_days = max(7, ai_response.duration_weeks * 7)
         start_date = date.today()
         steps = ai_response.steps
@@ -345,11 +346,19 @@ Do not mix languages.
         for day_number in range(1, total_days + 1):
             planned_date = start_date + timedelta(days=day_number - 1)
             weekday = planned_date.isoweekday()
-            step = self._pick_step_for_day(steps=steps, day_number=day_number, total_days=total_days)
+            step = self._pick_step_for_day(
+                steps=steps,
+                day_number=day_number,
+                total_days=total_days,
+            )
 
             day_tasks: list[dict] = []
             for task in tasks:
-                if self._task_is_scheduled_for_day(task=task, day_number=day_number, weekday=weekday):
+                if self._task_is_scheduled_for_day(
+                    task=task,
+                    day_number=day_number,
+                    weekday=weekday,
+                ):
                     day_tasks.append(
                         {
                             "title": task.title,

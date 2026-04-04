@@ -165,12 +165,14 @@ def create_daily_plans_for_goal(
         )
 
         for day in generated_days:
+            parsed_planned_date = _parse_date(day.planned_date)
+
             daily_plan_row = conn.execute(
                 insert_daily_plan_query,
                 {
                     "goal_id": goal_id,
                     "day_number": day.day_number,
-                    "planned_date": day.planned_date,
+                    "planned_date": parsed_planned_date,
                     "focus": day.focus,
                     "summary": day.summary,
                     "status": DailyPlanStatus.pending.value,
