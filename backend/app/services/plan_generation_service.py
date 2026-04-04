@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from sqlalchemy import text
 
 from app.config import settings
@@ -272,6 +274,22 @@ class PlanGenerationService:
                     raise AIResponseValidationError("ai_task_days_of_week_out_of_range")
 
     def _map_to_plan_payload(self, goal_id: str, ai_response: AIPlanResponseV2) -> dict:
+        recurring_tasks = [
+            {
+                "task_id": f"{goal_id}-task-{index}",
+                "title": task.title,
+                "description": task.description,
+                "cadence_type": task.cadence_type,
+                "cadence_config": task.cadence_config,
+                "proof_type": task.proof_type,
+                "proof_required": task.proof_required,
+                "order": index,
+            }
+            for index, task in enumerate(ai_response.tasks, start=1)
+        ]
+
+        days = self._build_daily_days(goal_id=goal_id, ai_response=ai_response)
+
         content = {
             "duration_weeks": ai_response.duration_weeks,
             "milestones": [step.title for step in ai_response.steps],
@@ -284,19 +302,8 @@ class PlanGenerationService:
                 }
                 for index, step in enumerate(ai_response.steps, start=1)
             ],
-            "tasks": [
-                {
-                    "task_id": f"{goal_id}-task-{index}",
-                    "title": task.title,
-                    "description": task.description,
-                    "cadence_type": task.cadence_type,
-                    "cadence_config": task.cadence_config,
-                    "proof_type": task.proof_type,
-                    "proof_required": task.proof_required,
-                    "order": index,
-                }
-                for index, task in enumerate(ai_response.tasks, start=1)
-            ],
+            "tasks": recurring_tasks,
+            "days": days,
         }
 
         return {
@@ -305,6 +312,95 @@ class PlanGenerationService:
             "content": content,
             "status": "draft",
         }
+
+    def _build_daily_days(self, goal_id: str, ai_response: AIPlanResponseV2) -> list[dict]:
+        total_days = max(7, ai_response.duration_weeks * 7)
+        start_date = date.today()
+        steps = ai_response.steps
+        tasks = ai_response.tasks
+
+        days: list[dict] = []
+
+        for day_number in range(1, total_days + 1):
+            planned_date = start_date + timedelta(days=day_number - 1)
+            weekday = planned_date.isoweekday()
+            step = self._pick_step_for_day(steps=steps, day_number=day_number, total_days=total_days)
+
+            day_tasks: list[dict] = []
+            for task in tasks:
+                if self._task_is_scheduled_for_day(task=task, day_number=day_number, weekday=weekday):
+                    day_tasks.append(
+                        {
+                            "title": task.title,
+                            "description": task.description,
+                            "instructions": task.description,
+                            "estimated_minutes": None,
+                            "is_required": True,
+                            "proof_required": task.proof_required,
+                        }
+                    )
+
+            if not day_tasks and tasks:
+                first_task = tasks[0]
+                day_tasks.append(
+                    {
+                        "title": first_task.title,
+                        "description": first_task.description,
+                        "instructions": first_task.description,
+                        "estimated_minutes": None,
+                        "is_required": True,
+                        "proof_required": first_task.proof_required,
+                    }
+                )
+
+            days.append(
+                {
+                    "day_number": day_number,
+                    "focus": step.title,
+                    "summary": step.description,
+                    "planned_date": planned_date.isoformat(),
+                    "tasks": day_tasks,
+                }
+            )
+
+        return days
+
+    def _pick_step_for_day(self, *, steps, day_number: int, total_days: int):
+        if not steps:
+            raise AIResponseValidationError("ai_response_steps_empty")
+
+        block_size = max(1, total_days // len(steps))
+        index = min((day_number - 1) // block_size, len(steps) - 1)
+        return steps[index]
+
+    def _task_is_scheduled_for_day(self, *, task, day_number: int, weekday: int) -> bool:
+        if task.cadence_type == "daily":
+            return True
+
+        if task.cadence_type == "specific_weekdays":
+            days_of_week = task.cadence_config.get("days_of_week", [])
+            return weekday in days_of_week
+
+        if task.cadence_type == "weekly":
+            times_per_week = task.cadence_config.get("times_per_week", 1)
+            scheduled_weekdays = self._weekly_slots(times_per_week)
+            return weekday in scheduled_weekdays
+
+        return False
+
+    def _weekly_slots(self, times_per_week: int) -> set[int]:
+        normalized = max(1, min(int(times_per_week), 7))
+
+        presets: dict[int, set[int]] = {
+            1: {1},
+            2: {2, 5},
+            3: {1, 3, 5},
+            4: {1, 2, 4, 6},
+            5: {1, 2, 3, 5, 6},
+            6: {1, 2, 3, 4, 5, 6},
+            7: {1, 2, 3, 4, 5, 6, 7},
+        }
+        return presets[normalized]
 
     def _build_retry_user_prompt(self, original_user_prompt: str) -> str:
         return f"""
