@@ -9,9 +9,9 @@ from app.schemas.daily_plan import (
     TodayPlanResponse,
 )
 from app.services.daily_plan_service import (
+    enrich_today_plan_if_needed,
     get_daily_plan_by_day_number,
     get_goal_daily_plans,
-    get_today_plan,
     update_daily_plan_status,
     update_daily_task_status,
 )
@@ -31,8 +31,8 @@ def list_goal_daily_plans(goal_id: str):
     "/goals/{goal_id}/daily-plans/today",
     response_model=TodayPlanResponse,
 )
-def get_goal_today_plan(goal_id: str):
-    daily_plan = get_today_plan(goal_id)
+async def get_goal_today_plan(goal_id: str):
+    daily_plan = await enrich_today_plan_if_needed(goal_id)
 
     return TodayPlanResponse(
         date=date.today(),
