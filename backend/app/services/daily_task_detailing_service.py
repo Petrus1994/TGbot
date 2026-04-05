@@ -313,6 +313,21 @@ class DailyTaskDetailingService:
                 or f"This task supports today's focus: {fallback_day.get('focus') or 'execution'}."
             )
 
+            recommended_proof_type = (
+                self._default_proof_type_for_task_type(task_type)
+                if proof_required
+                else None
+            )
+            proof_prompt = (
+                self._default_proof_prompt(
+                    task_type=task_type,
+                    proof_type=recommended_proof_type,
+                    title=title,
+                )
+                if proof_required
+                else None
+            )
+
             technique_cues = self._fallback_technique_cues(task_type=task_type)
             steps = self._fallback_steps(
                 title=title,
@@ -336,12 +351,8 @@ class DailyTaskDetailingService:
                     "priority": priority,
                     "is_required": is_required,
                     "proof_required": proof_required,
-                    "recommended_proof_type": "text" if proof_required else None,
-                    "proof_prompt": (
-                        "Send a short text report about what you completed."
-                        if proof_required
-                        else None
-                    ),
+                    "recommended_proof_type": recommended_proof_type,
+                    "proof_prompt": proof_prompt,
                     "task_type": task_type,
                     "difficulty": "medium",
                     "tips": [],
@@ -363,7 +374,7 @@ class DailyTaskDetailingService:
     def _infer_fallback_detail_level(self, *, task_type: str) -> int:
         if task_type in {"fitness", "music", "speech", "drawing", "meditation", "rehab"}:
             return 3
-        if task_type in {"language", "study", "work"}:
+        if task_type in {"language", "study", "work", "nutrition", "activity"}:
             return 2
         return 1
 
@@ -588,6 +599,14 @@ class DailyTaskDetailingService:
             normalized.get("recommended_proof_type")
         )
 
+        proof_required = normalized.get("proof_required")
+        if isinstance(proof_required, str):
+            normalized["proof_required"] = proof_required.strip().lower() in {
+                "true", "1", "yes", "y"
+            }
+        else:
+            normalized["proof_required"] = bool(proof_required)
+
         detail_level = normalized.get("detail_level")
         try:
             normalized["detail_level"] = int(detail_level)
@@ -595,6 +614,20 @@ class DailyTaskDetailingService:
             normalized["detail_level"] = self._default_detail_level_for_task_type(
                 normalized["task_type"]
             )
+
+        if normalized["proof_required"]:
+            if not normalized.get("recommended_proof_type"):
+                normalized["recommended_proof_type"] = self._default_proof_type_for_task_type(
+                    normalized.get("task_type")
+                )
+
+            proof_prompt = normalized.get("proof_prompt")
+            if proof_prompt is None or not str(proof_prompt).strip():
+                normalized["proof_prompt"] = self._default_proof_prompt(
+                    task_type=normalized.get("task_type"),
+                    proof_type=normalized.get("recommended_proof_type"),
+                    title=normalized.get("title"),
+                )
 
         resources = normalized.get("resources")
         if isinstance(resources, list):
@@ -796,3 +829,43 @@ class DailyTaskDetailingService:
         if task_type in {"language", "study", "work", "nutrition", "activity"}:
             return 2
         return 1
+
+    def _default_proof_type_for_task_type(self, task_type: Any) -> str:
+        task_type = str(task_type or "").strip().lower()
+
+        mapping = {
+            "fitness": "photo",
+            "music": "video",
+            "language": "text",
+            "study": "text",
+            "work": "screenshot",
+            "habit": "text",
+            "speech": "video",
+            "drawing": "photo",
+            "meditation": "text",
+            "rehab": "video",
+            "nutrition": "photo",
+            "activity": "photo",
+            "generic": "text",
+        }
+        return mapping.get(task_type, "text")
+
+    def _default_proof_prompt(
+        self,
+        *,
+        task_type: Any,
+        proof_type: Any,
+        title: Any,
+    ) -> str:
+        proof_type = str(proof_type or "text").strip().lower()
+        title = str(title or "the task").strip()
+
+        if proof_type == "photo":
+            return f"Send a photo confirming you completed: {title}."
+        if proof_type == "video":
+            return f"Send a short video clip showing the result of: {title}."
+        if proof_type == "screenshot":
+            return f"Send a screenshot confirming completion of: {title}."
+        if proof_type == "file":
+            return f"Send the file or document related to: {title}."
+        return f"Send a short text report describing how you completed: {title}."
