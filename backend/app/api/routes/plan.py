@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, HTTPException, status
 
 from app.core.exceptions import (
@@ -48,53 +46,31 @@ async def generate_plan_endpoint(goal_id: str, payload: GeneratePlanRequest):
         print(f"❌ AI PLAN GENERATION ERROR: {repr(original_error)}")
 
         try:
-            return generate_stub_plan(goal_id=goal_id, regenerate=payload.regenerate)
-
+            return generate_stub_plan(
+                goal_id=goal_id,
+                regenerate=payload.regenerate,
+            )
         except Exception as fallback_error:
             print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
-            now = datetime.now(timezone.utc)
-
-            return PlanResponse(
-                id="fallback",
-                goal_id=goal_id,
-                status="draft",
-                title="Temporary fallback plan",
-                summary="Plan generation failed, fallback used",
-                content={
-                    "duration_weeks": 1,
-                    "milestones": ["Temporary fallback"],
-                    "steps": [],
-                },
-                accepted_at=None,
-                created_at=now,
-                updated_at=now,
-            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="plan_generation_failed",
+            ) from fallback_error
 
     except Exception as original_error:
         print(f"❌ UNEXPECTED PLAN GENERATION ERROR: {repr(original_error)}")
 
         try:
-            return generate_stub_plan(goal_id=goal_id, regenerate=payload.regenerate)
-
+            return generate_stub_plan(
+                goal_id=goal_id,
+                regenerate=payload.regenerate,
+            )
         except Exception as fallback_error:
             print(f"❌ STUB PLAN FALLBACK ERROR: {repr(fallback_error)}")
-            now = datetime.now(timezone.utc)
-
-            return PlanResponse(
-                id="fallback",
-                goal_id=goal_id,
-                status="draft",
-                title="Temporary fallback plan",
-                summary="Plan generation failed, fallback used",
-                content={
-                    "duration_weeks": 1,
-                    "milestones": ["Temporary fallback"],
-                    "steps": [],
-                },
-                accepted_at=None,
-                created_at=now,
-                updated_at=now,
-            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="plan_generation_failed",
+            ) from fallback_error
 
 
 @router.get(
