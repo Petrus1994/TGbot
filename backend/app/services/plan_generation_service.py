@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import re
+from typing import Any
 
 from sqlalchemy import text
 
@@ -21,6 +22,73 @@ from app.services.plan_service import save_generated_plan
 
 
 class PlanGenerationService:
+    ALLOWED_CADENCE_TYPES = {"daily", "weekly", "specific_weekdays"}
+    ALLOWED_PROOF_TYPES = {"text", "photo", "screenshot", "file"}
+
+    PROOF_TYPE_ALIASES = {
+        "video": "file",
+        "audio": "file",
+        "voice": "file",
+        "voice_note": "file",
+        "document": "file",
+        "pdf": "file",
+        "image": "photo",
+        "picture": "photo",
+        "img": "photo",
+        "photo_text": "photo",
+        "screen": "screenshot",
+        "screen_recording": "file",
+        "recording": "file",
+        "attachment": "file",
+    }
+
+    CADENCE_TYPE_ALIASES = {
+        "every_day": "daily",
+        "everyday": "daily",
+        "each_day": "daily",
+        "weekdays": "specific_weekdays",
+        "weekday": "specific_weekdays",
+        "specific_days": "specific_weekdays",
+        "days_of_week": "specific_weekdays",
+        "certain_days": "specific_weekdays",
+        "x_per_week": "weekly",
+        "times_per_week": "weekly",
+    }
+
+    WEEKDAY_NAME_TO_INT = {
+        "monday": 1,
+        "mon": 1,
+        "tuesday": 2,
+        "tue": 2,
+        "tues": 2,
+        "wednesday": 3,
+        "wed": 3,
+        "thursday": 4,
+        "thu": 4,
+        "thur": 4,
+        "thurs": 4,
+        "friday": 5,
+        "fri": 5,
+        "saturday": 6,
+        "sat": 6,
+        "sunday": 7,
+        "sun": 7,
+        "понедельник": 1,
+        "пн": 1,
+        "вторник": 2,
+        "вт": 2,
+        "среда": 3,
+        "ср": 3,
+        "четверг": 4,
+        "чт": 4,
+        "пятница": 5,
+        "пт": 5,
+        "суббота": 6,
+        "сб": 6,
+        "воскресенье": 7,
+        "вс": 7,
+    }
+
     def __init__(self) -> None:
         self.prompt_builder = PlanPromptBuilder()
         self.llm_client = OpenAIClient(
@@ -90,8 +158,7 @@ Do not mix languages.
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            ai_response = AIPlanResponseV2.model_validate(raw_response)
-            self._validate_ai_response(ai_response)
+            ai_response = self._parse_and_validate_ai_response(raw_response)
             return ai_response
         except Exception as e:
             first_error = e
@@ -106,13 +173,273 @@ Do not mix languages.
                 system_prompt=system_prompt,
                 user_prompt=retry_user_prompt,
             )
-            ai_response = AIPlanResponseV2.model_validate(raw_response)
-            self._validate_ai_response(ai_response)
+            ai_response = self._parse_and_validate_ai_response(raw_response)
             return ai_response
         except Exception as retry_error:
             raise AIPlanGenerationError(
                 f"ai_generation_failed_after_retry | first_error={first_error} | retry_error={retry_error}"
             ) from retry_error
+
+    def _parse_and_validate_ai_response(self, raw_response: Any) -> AIPlanResponseV2:
+        normalized_payload = self._normalize_ai_response_payload(raw_response)
+        ai_response = AIPlanResponseV2.model_validate(normalized_payload)
+        self._validate_ai_response(ai_response)
+        return ai_response
+
+    def _normalize_ai_response_payload(self, raw_response: Any) -> dict[str, Any]:
+        if hasattr(raw_response, "model_dump"):
+            payload = raw_response.model_dump()
+        elif isinstance(raw_response, dict):
+            payload = dict(raw_response)
+        else:
+            raise AIResponseValidationError("ai_response_not_a_dict")
+
+        payload["summary"] = self._safe_text(payload.get("summary"))
+        payload["duration_weeks"] = self._normalize_duration_weeks(
+            payload.get("duration_weeks")
+        )
+        payload["steps"] = self._normalize_steps(payload.get("steps"))
+        payload["tasks"] = self._normalize_tasks(payload.get("tasks"))
+
+        return payload
+
+    def _normalize_steps(self, raw_steps: Any) -> list[dict[str, str]]:
+        if not isinstance(raw_steps, list):
+            return []
+
+        normalized_steps: list[dict[str, str]] = []
+
+        for item in raw_steps:
+            if not isinstance(item, dict):
+                continue
+
+            title = self._safe_text(item.get("title"))
+            description = self._safe_text(item.get("description"))
+
+            if not title:
+                title = "Untitled step"
+            if not description:
+                description = "Complete the next concrete milestone for this goal."
+
+            normalized_steps.append(
+                {
+                    "title": title,
+                    "description": description,
+                }
+            )
+
+        return normalized_steps
+
+    def _normalize_tasks(self, raw_tasks: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_tasks, list):
+            return []
+
+        normalized_tasks: list[dict[str, Any]] = []
+
+        for item in raw_tasks:
+            if not isinstance(item, dict):
+                continue
+
+            title = self._safe_text(item.get("title")) or "Untitled task"
+            description = self._safe_text(item.get("description")) or (
+                "Do one concrete repeatable action that directly moves the goal forward."
+            )
+
+            cadence_type = self._normalize_cadence_type(item.get("cadence_type"))
+            cadence_config = self._normalize_cadence_config(
+                cadence_type=cadence_type,
+                raw_config=item.get("cadence_config"),
+                raw_task=item,
+            )
+
+            proof_type = self._normalize_proof_type(item.get("proof_type"))
+            proof_required = self._normalize_bool(item.get("proof_required"), default=True)
+
+            normalized_tasks.append(
+                {
+                    "title": title,
+                    "description": description,
+                    "cadence_type": cadence_type,
+                    "cadence_config": cadence_config,
+                    "proof_type": proof_type,
+                    "proof_required": proof_required,
+                }
+            )
+
+        return normalized_tasks
+
+    def _normalize_cadence_type(self, raw_value: Any) -> str:
+        value = self._safe_text(raw_value)
+        if not value:
+            return "daily"
+
+        value = value.strip().lower()
+        value = self.CADENCE_TYPE_ALIASES.get(value, value)
+
+        if value in self.ALLOWED_CADENCE_TYPES:
+            return value
+
+        return "daily"
+
+    def _normalize_cadence_config(
+        self,
+        *,
+        cadence_type: str,
+        raw_config: Any,
+        raw_task: dict[str, Any],
+    ) -> dict[str, Any]:
+        config = raw_config if isinstance(raw_config, dict) else {}
+
+        if cadence_type == "daily":
+            return {}
+
+        if cadence_type == "weekly":
+            times_per_week = (
+                config.get("times_per_week")
+                or config.get("count")
+                or config.get("frequency")
+                or raw_task.get("times_per_week")
+            )
+
+            normalized_times = self._normalize_positive_int(times_per_week, default=3)
+            normalized_times = max(1, min(normalized_times, 7))
+
+            return {"times_per_week": normalized_times}
+
+        if cadence_type == "specific_weekdays":
+            raw_days = (
+                config.get("days_of_week")
+                or config.get("weekdays")
+                or config.get("days")
+                or raw_task.get("days_of_week")
+                or raw_task.get("weekdays")
+            )
+
+            normalized_days = self._normalize_days_of_week(raw_days)
+
+            if not normalized_days:
+                fallback_days = config.get("times_per_week") or raw_task.get("times_per_week")
+                if fallback_days:
+                    count = max(1, min(self._normalize_positive_int(fallback_days, default=3), 7))
+                    normalized_days = sorted(self._weekly_slots(count))
+                else:
+                    normalized_days = [1, 3, 5]
+
+            return {"days_of_week": normalized_days}
+
+        return {}
+
+    def _normalize_days_of_week(self, raw_days: Any) -> list[int]:
+        if raw_days is None:
+            return []
+
+        values: list[Any]
+        if isinstance(raw_days, list):
+            values = raw_days
+        else:
+            values = [raw_days]
+
+        normalized: list[int] = []
+
+        for item in values:
+            day_int = self._normalize_single_weekday(item)
+            if day_int is not None:
+                normalized.append(day_int)
+
+        deduplicated = sorted(set(day for day in normalized if 1 <= day <= 7))
+        return deduplicated
+
+    def _normalize_single_weekday(self, value: Any) -> int | None:
+        if value is None:
+            return None
+
+        if isinstance(value, bool):
+            return None
+
+        if isinstance(value, int):
+            if 1 <= value <= 7:
+                return value
+            if 0 <= value <= 6:
+                return 7 if value == 0 else value
+            return None
+
+        text_value = self._safe_text(value)
+        if not text_value:
+            return None
+
+        lowered = text_value.lower()
+
+        if lowered in self.WEEKDAY_NAME_TO_INT:
+            return self.WEEKDAY_NAME_TO_INT[lowered]
+
+        digits = re.findall(r"\d+", lowered)
+        if digits:
+            num = int(digits[0])
+            if 1 <= num <= 7:
+                return num
+            if 0 <= num <= 6:
+                return 7 if num == 0 else num
+
+        return None
+
+    def _normalize_proof_type(self, raw_value: Any) -> str:
+        value = self._safe_text(raw_value)
+        if not value:
+            return "text"
+
+        value = value.strip().lower()
+        value = self.PROOF_TYPE_ALIASES.get(value, value)
+
+        if value in self.ALLOWED_PROOF_TYPES:
+            return value
+
+        return "text"
+
+    def _normalize_duration_weeks(self, raw_value: Any) -> int:
+        normalized = self._normalize_positive_int(raw_value, default=4)
+        return max(1, normalized)
+
+    def _normalize_positive_int(self, raw_value: Any, default: int) -> int:
+        if raw_value is None:
+            return default
+
+        if isinstance(raw_value, bool):
+            return default
+
+        if isinstance(raw_value, int):
+            return raw_value if raw_value > 0 else default
+
+        try:
+            parsed = int(str(raw_value).strip())
+            return parsed if parsed > 0 else default
+        except Exception:
+            return default
+
+    def _normalize_bool(self, raw_value: Any, default: bool) -> bool:
+        if isinstance(raw_value, bool):
+            return raw_value
+
+        if raw_value is None:
+            return default
+
+        text_value = str(raw_value).strip().lower()
+        if text_value in {"true", "1", "yes", "y"}:
+            return True
+        if text_value in {"false", "0", "no", "n"}:
+            return False
+
+        return default
+
+    def _safe_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+
+        normalized = str(value).strip()
+        return normalized or None
 
     async def _load_context(self, goal_id: str) -> GoalGenerationContext:
         with engine.begin() as connection:
@@ -266,21 +593,18 @@ Do not mix languages.
                         f"ai_response_contains_forbidden_phrase: {phrase}"
                     )
 
-        allowed_cadence_types = {"daily", "weekly", "specific_weekdays"}
-        allowed_proof_types = {"text", "photo", "screenshot", "file"}
-
         for task in tasks:
             if not task.title.strip():
                 raise AIResponseValidationError("ai_task_title_empty")
             if not task.description.strip():
                 raise AIResponseValidationError("ai_task_description_empty")
 
-            if task.cadence_type not in allowed_cadence_types:
+            if task.cadence_type not in self.ALLOWED_CADENCE_TYPES:
                 raise AIResponseValidationError(
                     f"ai_task_invalid_cadence_type: {task.cadence_type}"
                 )
 
-            if task.proof_type not in allowed_proof_types:
+            if task.proof_type not in self.ALLOWED_PROOF_TYPES:
                 raise AIResponseValidationError(
                     f"ai_task_invalid_proof_type: {task.proof_type}"
                 )
