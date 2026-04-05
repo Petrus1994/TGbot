@@ -15,6 +15,7 @@ from app.core.exceptions import (
 from app.db import engine
 from app.schemas.ai_plan_v2 import AIPlanResponseV2
 from app.schemas.goal_generation import GoalGenerationContext
+from app.services.daily_task_detailing_service import DailyTaskDetailingService
 from app.services.openai_client import OpenAIClient
 from app.services.plan_prompt_builder import PlanPromptBuilder
 from app.services.plan_service import save_generated_plan
@@ -27,6 +28,7 @@ class PlanGenerationService:
             api_key=settings.openai_api_key,
             model=settings.openai_model,
         )
+        self.daily_task_detailing_service = DailyTaskDetailingService()
 
     async def generate_plan(self, goal_id: str, regenerate: bool = False):
         if not settings.ai_plan_generation_enabled:
@@ -59,7 +61,12 @@ Do not mix languages.
             response_language=response_language,
         )
 
-        plan_payload = self._map_to_plan_payload(goal_id=goal_id, ai_response=ai_response)
+        plan_payload = await self._map_to_plan_payload(
+            goal_id=goal_id,
+            ai_response=ai_response,
+            context=context,
+            response_language=response_language,
+        )
 
         return save_generated_plan(
             goal_id=goal_id,
@@ -294,7 +301,14 @@ Do not mix languages.
                 if not all(isinstance(day, int) and 1 <= day <= 7 for day in days_of_week):
                     raise AIResponseValidationError("ai_task_days_of_week_out_of_range")
 
-    def _map_to_plan_payload(self, goal_id: str, ai_response: AIPlanResponseV2) -> dict:
+    async def _map_to_plan_payload(
+        self,
+        *,
+        goal_id: str,
+        ai_response: AIPlanResponseV2,
+        context: GoalGenerationContext,
+        response_language: str,
+    ) -> dict:
         recurring_tasks = [
             {
                 "task_id": f"{goal_id}-task-{index}",
@@ -310,7 +324,18 @@ Do not mix languages.
         ]
 
         days = self._build_daily_days(ai_response=ai_response)
-        print(f"🔥 GENERATED DAYS COUNT: {len(days)}")
+        print(f"🔥 GENERATED BASE DAYS COUNT: {len(days)}")
+
+        try:
+            days = await self.daily_task_detailing_service.enrich_days(
+                context=context,
+                days=days,
+                response_language=response_language,
+            )
+            print(f"🔥 ENRICHED DAYS COUNT: {len(days)}")
+        except Exception as e:
+            print(f"⚠️ DAILY TASK DETAILING FAILED FOR PLAN: {e}")
+            # Не валим весь flow. Оставляем базовые days.
 
         content = {
             "duration_weeks": ai_response.duration_weeks,
@@ -363,10 +388,25 @@ Do not mix languages.
                         {
                             "title": task.title,
                             "description": task.description,
+                            "objective": None,
                             "instructions": task.description,
+                            "why_today": None,
+                            "success_criteria": None,
                             "estimated_minutes": None,
+                            "detail_level": 1,
+                            "bucket": "must",
+                            "priority": "medium",
                             "is_required": True,
                             "proof_required": task.proof_required,
+                            "recommended_proof_type": task.proof_type,
+                            "proof_prompt": None,
+                            "task_type": None,
+                            "difficulty": None,
+                            "tips": [],
+                            "technique_cues": [],
+                            "common_mistakes": [],
+                            "steps": [],
+                            "resources": [],
                         }
                     )
 
@@ -376,10 +416,25 @@ Do not mix languages.
                     {
                         "title": first_task.title,
                         "description": first_task.description,
+                        "objective": None,
                         "instructions": first_task.description,
+                        "why_today": None,
+                        "success_criteria": None,
                         "estimated_minutes": None,
+                        "detail_level": 1,
+                        "bucket": "must",
+                        "priority": "medium",
                         "is_required": True,
                         "proof_required": first_task.proof_required,
+                        "recommended_proof_type": first_task.proof_type,
+                        "proof_prompt": None,
+                        "task_type": None,
+                        "difficulty": None,
+                        "tips": [],
+                        "technique_cues": [],
+                        "common_mistakes": [],
+                        "steps": [],
+                        "resources": [],
                     }
                 )
 
@@ -388,6 +443,10 @@ Do not mix languages.
                     "day_number": day_number,
                     "focus": step.title,
                     "summary": step.description,
+                    "headline": None,
+                    "focus_message": None,
+                    "main_task_title": None,
+                    "total_estimated_minutes": None,
                     "planned_date": planned_date.isoformat(),
                     "tasks": day_tasks,
                 }

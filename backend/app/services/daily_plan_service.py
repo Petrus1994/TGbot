@@ -10,7 +10,9 @@ from app.models.daily_plan import DailyPlanStatus
 from app.models.daily_task import DailyTaskStatus
 from app.schemas.daily_plan import (
     DailyPlanResponse,
+    DailyTaskResourceResponse,
     DailyTaskResponse,
+    DailyTaskStepResponse,
     GeneratedDailyPlan,
 )
 
@@ -27,6 +29,67 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+def _safe_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _parse_task_steps(value: Any) -> list[DailyTaskStepResponse]:
+    raw_steps = _safe_list(value)
+    parsed_steps: list[DailyTaskStepResponse] = []
+
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+
+        parsed_steps.append(
+            DailyTaskStepResponse(
+                order=int(item.get("order") or 1),
+                title=str(item.get("title") or ""),
+                instruction=str(item.get("instruction") or ""),
+                duration_minutes=item.get("duration_minutes"),
+                sets=item.get("sets"),
+                reps=item.get("reps"),
+                rest_seconds=item.get("rest_seconds"),
+                notes=[
+                    str(note)
+                    for note in _safe_list(item.get("notes"))
+                    if str(note).strip()
+                ],
+            )
+        )
+
+    return parsed_steps
+
+
+def _parse_task_resources(value: Any) -> list[DailyTaskResourceResponse]:
+    raw_resources = _safe_list(value)
+    parsed_resources: list[DailyTaskResourceResponse] = []
+
+    for item in raw_resources:
+        if not isinstance(item, dict):
+            continue
+
+        title = str(item.get("title") or "").strip()
+        resource_type = str(item.get("resource_type") or "").strip()
+
+        if not title or not resource_type:
+            continue
+
+        parsed_resources.append(
+            DailyTaskResourceResponse(
+                title=title,
+                resource_type=resource_type,
+                note=item.get("note"),
+            )
+        )
+
+    return parsed_resources
+
+
 def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskResponse]:
     query = text(
         """
@@ -35,12 +98,27 @@ def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskRespons
             daily_plan_id,
             goal_id,
             title,
+            objective,
             description,
             instructions,
+            why_today,
+            success_criteria,
             estimated_minutes,
+            detail_level,
+            bucket,
+            priority,
             order_index,
             is_required,
             proof_required,
+            recommended_proof_type,
+            proof_prompt,
+            task_type,
+            difficulty,
+            tips,
+            technique_cues,
+            common_mistakes,
+            steps,
+            resources,
             status,
             completed_at,
             created_at
@@ -58,12 +136,39 @@ def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskRespons
             daily_plan_id=str(row["daily_plan_id"]),
             goal_id=str(row["goal_id"]),
             title=row["title"],
+            objective=row["objective"],
             description=row["description"],
             instructions=row["instructions"],
+            why_today=row["why_today"],
+            success_criteria=row["success_criteria"],
             estimated_minutes=row["estimated_minutes"],
+            detail_level=int(row["detail_level"] or 1),
+            bucket=row["bucket"] or "must",
+            priority=row["priority"] or "medium",
             order_index=row["order_index"],
             is_required=bool(row["is_required"]),
             proof_required=bool(row["proof_required"]),
+            recommended_proof_type=row["recommended_proof_type"],
+            proof_prompt=row["proof_prompt"],
+            task_type=row["task_type"],
+            difficulty=row["difficulty"],
+            tips=[
+                str(item)
+                for item in _safe_list(row["tips"])
+                if str(item).strip()
+            ],
+            technique_cues=[
+                str(item)
+                for item in _safe_list(row["technique_cues"])
+                if str(item).strip()
+            ],
+            common_mistakes=[
+                str(item)
+                for item in _safe_list(row["common_mistakes"])
+                if str(item).strip()
+            ],
+            steps=_parse_task_steps(row["steps"]),
+            resources=_parse_task_resources(row["resources"]),
             status=DailyTaskStatus(row["status"]),
             completed_at=row["completed_at"],
             created_at=row["created_at"],
@@ -82,6 +187,10 @@ def _build_daily_plan_response(conn, row) -> DailyPlanResponse:
         planned_date=_parse_date(row["planned_date"]),
         focus=row["focus"],
         summary=row["summary"],
+        headline=row["headline"],
+        focus_message=row["focus_message"],
+        main_task_title=row["main_task_title"],
+        total_estimated_minutes=row["total_estimated_minutes"],
         status=DailyPlanStatus(row["status"]),
         tasks=tasks,
         created_at=row["created_at"],
@@ -113,6 +222,10 @@ def create_daily_plans_for_goal(
                 planned_date,
                 focus,
                 summary,
+                headline,
+                focus_message,
+                main_task_title,
+                total_estimated_minutes,
                 status
             )
             VALUES (
@@ -121,6 +234,10 @@ def create_daily_plans_for_goal(
                 :planned_date,
                 :focus,
                 :summary,
+                :headline,
+                :focus_message,
+                :main_task_title,
+                :total_estimated_minutes,
                 :status
             )
             RETURNING
@@ -130,6 +247,10 @@ def create_daily_plans_for_goal(
                 planned_date,
                 focus,
                 summary,
+                headline,
+                focus_message,
+                main_task_title,
+                total_estimated_minutes,
                 status,
                 created_at
             """
@@ -141,24 +262,54 @@ def create_daily_plans_for_goal(
                 daily_plan_id,
                 goal_id,
                 title,
+                objective,
                 description,
                 instructions,
+                why_today,
+                success_criteria,
                 estimated_minutes,
+                detail_level,
+                bucket,
+                priority,
                 order_index,
                 is_required,
                 proof_required,
+                recommended_proof_type,
+                proof_prompt,
+                task_type,
+                difficulty,
+                tips,
+                technique_cues,
+                common_mistakes,
+                steps,
+                resources,
                 status
             )
             VALUES (
                 :daily_plan_id,
                 :goal_id,
                 :title,
+                :objective,
                 :description,
                 :instructions,
+                :why_today,
+                :success_criteria,
                 :estimated_minutes,
+                :detail_level,
+                :bucket,
+                :priority,
                 :order_index,
                 :is_required,
                 :proof_required,
+                :recommended_proof_type,
+                :proof_prompt,
+                :task_type,
+                :difficulty,
+                CAST(:tips AS JSONB),
+                CAST(:technique_cues AS JSONB),
+                CAST(:common_mistakes AS JSONB),
+                CAST(:steps AS JSONB),
+                CAST(:resources AS JSONB),
                 :status
             )
             """
@@ -169,6 +320,12 @@ def create_daily_plans_for_goal(
             if not parsed_planned_date:
                 parsed_planned_date = date.today()
 
+            total_estimated_minutes = day.total_estimated_minutes
+            if total_estimated_minutes is None:
+                total_estimated_minutes = sum(
+                    task.estimated_minutes or 0 for task in day.tasks
+                ) or None
+
             daily_plan_row = conn.execute(
                 insert_daily_plan_query,
                 {
@@ -177,6 +334,10 @@ def create_daily_plans_for_goal(
                     "planned_date": parsed_planned_date,
                     "focus": day.focus,
                     "summary": day.summary,
+                    "headline": day.headline,
+                    "focus_message": day.focus_message,
+                    "main_task_title": day.main_task_title,
+                    "total_estimated_minutes": total_estimated_minutes,
                     "status": DailyPlanStatus.pending.value,
                 },
             ).mappings().one()
@@ -190,12 +351,39 @@ def create_daily_plans_for_goal(
                         "daily_plan_id": daily_plan_id,
                         "goal_id": goal_id,
                         "title": task.title,
+                        "objective": task.objective,
                         "description": task.description,
                         "instructions": task.instructions,
+                        "why_today": task.why_today,
+                        "success_criteria": task.success_criteria,
                         "estimated_minutes": task.estimated_minutes,
+                        "detail_level": task.detail_level,
+                        "bucket": task.bucket,
+                        "priority": task.priority,
                         "order_index": index,
                         "is_required": task.is_required,
                         "proof_required": task.proof_required,
+                        "recommended_proof_type": task.recommended_proof_type,
+                        "proof_prompt": task.proof_prompt,
+                        "task_type": task.task_type,
+                        "difficulty": task.difficulty,
+                        "tips": __import__("json").dumps(task.tips, ensure_ascii=False),
+                        "technique_cues": __import__("json").dumps(
+                            task.technique_cues,
+                            ensure_ascii=False,
+                        ),
+                        "common_mistakes": __import__("json").dumps(
+                            task.common_mistakes,
+                            ensure_ascii=False,
+                        ),
+                        "steps": __import__("json").dumps(
+                            [step.model_dump() for step in task.steps],
+                            ensure_ascii=False,
+                        ),
+                        "resources": __import__("json").dumps(
+                            [resource.model_dump() for resource in task.resources],
+                            ensure_ascii=False,
+                        ),
                         "status": DailyTaskStatus.pending.value,
                     },
                 )
@@ -210,6 +398,10 @@ def create_daily_plans_for_goal(
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
@@ -235,6 +427,10 @@ def get_goal_daily_plans(goal_id: str) -> list[DailyPlanResponse]:
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
@@ -260,6 +456,10 @@ def get_daily_plan_by_day_number(goal_id: str, day_number: int) -> DailyPlanResp
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
@@ -294,6 +494,10 @@ def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanRes
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
@@ -322,6 +526,10 @@ def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanRes
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
@@ -396,6 +604,10 @@ def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | Non
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
@@ -507,6 +719,10 @@ def update_daily_plan_status(
                     planned_date,
                     focus,
                     summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
                     status,
                     created_at
                 FROM daily_plans
