@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -30,6 +31,103 @@ def _parse_date(value: Any) -> date | None:
     if isinstance(value, str):
         return date.fromisoformat(value)
     return None
+
+
+def _normalize_weekday_value(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        if 1 <= value <= 7:
+            return value
+        if 0 <= value <= 6:
+            return 7 if value == 0 else value
+        return None
+
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+
+    mapping = {
+        "monday": 1,
+        "mon": 1,
+        "понедельник": 1,
+        "пн": 1,
+        "tuesday": 2,
+        "tue": 2,
+        "tues": 2,
+        "вторник": 2,
+        "вт": 2,
+        "wednesday": 3,
+        "wed": 3,
+        "среда": 3,
+        "ср": 3,
+        "thursday": 4,
+        "thu": 4,
+        "thur": 4,
+        "thurs": 4,
+        "четверг": 4,
+        "чт": 4,
+        "friday": 5,
+        "fri": 5,
+        "пятница": 5,
+        "пт": 5,
+        "saturday": 6,
+        "sat": 6,
+        "суббота": 6,
+        "сб": 6,
+        "sunday": 7,
+        "sun": 7,
+        "воскресенье": 7,
+        "вс": 7,
+    }
+
+    if raw in mapping:
+        return mapping[raw]
+
+    parts = [part.strip() for part in re.split(r"[,;/|]+", raw) if part.strip()]
+    if len(parts) > 1:
+        return None
+
+    digits = re.findall(r"\d+", raw)
+    if digits:
+        num = int(digits[0])
+        if 1 <= num <= 7:
+            return num
+        if 0 <= num <= 6:
+            return 7 if num == 0 else num
+
+    return None
+
+
+def _extract_weekdays(value: Any) -> set[int]:
+    if value is None:
+        return set()
+
+    if isinstance(value, list):
+        result: set[int] = set()
+        for item in value:
+            result.update(_extract_weekdays(item))
+        return result
+
+    if isinstance(value, dict):
+        result: set[int] = set()
+        for nested in value.values():
+            result.update(_extract_weekdays(nested))
+        return result
+
+    if isinstance(value, str):
+        parts = [part.strip() for part in re.split(r"[,;/|]+", value) if part.strip()]
+        if len(parts) > 1:
+            result: set[int] = set()
+            for part in parts:
+                normalized = _normalize_weekday_value(part)
+                if normalized is not None:
+                    result.add(normalized)
+            return result
+
+    normalized = _normalize_weekday_value(value)
+    return {normalized} if normalized is not None else set()
 
 
 def _safe_list(value: Any) -> list[Any]:
@@ -479,6 +577,99 @@ def get_daily_plan_by_day_number(goal_id: str, day_number: int) -> DailyPlanResp
         return _build_daily_plan_response(conn, row)
 
 
+def get_daily_plan_by_id(daily_plan_id: str) -> DailyPlanResponse | None:
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    goal_id,
+                    day_number,
+                    planned_date,
+                    focus,
+                    summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
+                    status,
+                    created_at
+                FROM daily_plans
+                WHERE id = :daily_plan_id
+                LIMIT 1
+                """
+            ),
+            {"daily_plan_id": daily_plan_id},
+        ).mappings().first()
+
+        if not row:
+            return None
+
+        return _build_daily_plan_response(conn, row)
+
+
+def _load_goal_available_weekdays(goal_id: str) -> set[int] | None:
+    with engine.begin() as connection:
+        session = connection.execute(
+            text(
+                """
+                SELECT context_json
+                FROM goal_sessions
+                WHERE goal_id = :goal_id
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not session:
+            return None
+
+        context_json = session["context_json"] or {}
+        if not isinstance(context_json, dict):
+            return None
+
+        profiling = context_json.get("profiling", {})
+        if not isinstance(profiling, dict):
+            profiling = {}
+
+        profiling_summary = profiling.get("summary", {})
+        if not isinstance(profiling_summary, dict):
+            profiling_summary = {}
+
+        answers = profiling.get("answers", {})
+        if not isinstance(answers, dict):
+            answers = {}
+
+        candidates: list[Any] = [
+            profiling_summary.get("available_days"),
+            profiling_summary.get("preferred_days"),
+            profiling_summary.get("free_days"),
+            profiling_summary.get("weekdays"),
+            profiling_summary.get("days_of_week"),
+            profiling_summary.get("schedule_days"),
+            answers.get("available_days"),
+            answers.get("preferred_days"),
+            answers.get("free_days"),
+            answers.get("weekdays"),
+            answers.get("days_of_week"),
+            answers.get("schedule_days"),
+        ]
+
+        result: set[int] = set()
+        for candidate in candidates:
+            result.update(_extract_weekdays(candidate))
+
+        return result or None
+
+
+def _is_goal_allowed_for_date(goal_id: str, target_date: date) -> bool:
+    allowed_weekdays = _load_goal_available_weekdays(goal_id)
+    if not allowed_weekdays:
+        return True
+    return target_date.isoweekday() in allowed_weekdays
+
+
 def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanResponse | None:
     today_date = today_date or date.today()
 
@@ -545,6 +736,92 @@ def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanRes
             return None
 
         return _build_daily_plan_response(conn, fallback_row)
+
+
+def get_next_actionable_daily_plan(
+    goal_id: str,
+    reference_date: date | None = None,
+) -> DailyPlanResponse | None:
+    reference_date = reference_date or date.today()
+
+    with engine.begin() as conn:
+        in_progress_row = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    goal_id,
+                    day_number,
+                    planned_date,
+                    focus,
+                    summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
+                    status,
+                    created_at
+                FROM daily_plans
+                WHERE goal_id = :goal_id
+                  AND status = 'in_progress'
+                ORDER BY day_number ASC
+                LIMIT 1
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if in_progress_row:
+            return _build_daily_plan_response(conn, in_progress_row)
+
+        pending_rows = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    goal_id,
+                    day_number,
+                    planned_date,
+                    focus,
+                    summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
+                    status,
+                    created_at
+                FROM daily_plans
+                WHERE goal_id = :goal_id
+                  AND status = 'pending'
+                ORDER BY day_number ASC
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().all()
+
+        if not pending_rows:
+            return None
+
+        started_row = conn.execute(
+            text(
+                """
+                SELECT id
+                FROM daily_plans
+                WHERE goal_id = :goal_id
+                  AND status IN ('done', 'skipped', 'in_progress')
+                LIMIT 1
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not started_row:
+            return _build_daily_plan_response(conn, pending_rows[0])
+
+        if not _is_goal_allowed_for_date(goal_id, reference_date):
+            return None
+
+        return _build_daily_plan_response(conn, pending_rows[0])
 
 
 def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | None:
@@ -1049,3 +1326,30 @@ async def enrich_today_plan_if_needed(
     _update_detailed_daily_plan(plan.id, detailed_day)
 
     return get_today_plan(goal_id, today_date=today_date)
+
+
+async def enrich_next_actionable_daily_plan_if_needed(
+    goal_id: str,
+    reference_date: date | None = None,
+) -> DailyPlanResponse | None:
+    plan = get_next_actionable_daily_plan(goal_id, reference_date=reference_date)
+    if not plan:
+        return None
+
+    if not _daily_plan_needs_detailing(plan):
+        return plan
+
+    context = _load_goal_generation_context(goal_id)
+    response_language = _infer_response_language(context)
+    day_payload = _build_day_payload_from_plan(plan)
+
+    detailing_service = DailyTaskDetailingService()
+    detailed_day = await detailing_service.enrich_single_day(
+        context=context,
+        day=day_payload,
+        response_language=response_language,
+    )
+
+    _update_detailed_daily_plan(plan.id, detailed_day)
+
+    return get_daily_plan_by_id(plan.id)

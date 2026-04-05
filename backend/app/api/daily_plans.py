@@ -10,6 +10,7 @@ from app.schemas.daily_plan import (
 )
 from app.services.daily_plan_service import (
     enrich_today_plan_if_needed,
+    enrich_next_actionable_daily_plan_if_needed,
     get_daily_plan_by_day_number,
     get_goal_daily_plans,
     update_daily_plan_status,
@@ -27,12 +28,33 @@ def list_goal_daily_plans(goal_id: str):
     return get_goal_daily_plans(goal_id)
 
 
+# 🔴 СТАРЫЙ endpoint (оставляем для совместимости)
 @router.get(
     "/goals/{goal_id}/daily-plans/today",
     response_model=TodayPlanResponse,
 )
 async def get_goal_today_plan(goal_id: str):
     daily_plan = await enrich_today_plan_if_needed(goal_id)
+
+    return TodayPlanResponse(
+        date=date.today(),
+        daily_plan=daily_plan,
+    )
+
+
+# ✅ НОВЫЙ endpoint — ГЛАВНЫЙ ДЛЯ БОТА
+@router.get(
+    "/goals/{goal_id}/daily-plans/next",
+    response_model=TodayPlanResponse,
+)
+async def get_next_actionable_plan(goal_id: str):
+    """
+    Логика:
+    - если пользователь только начал → вернуть day 1 СРАЗУ
+    - если уже начал → вернуть следующий pending день
+    - если сегодня не его день → вернуть None
+    """
+    daily_plan = await enrich_next_actionable_daily_plan_if_needed(goal_id)
 
     return TodayPlanResponse(
         date=date.today(),

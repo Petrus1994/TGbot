@@ -123,6 +123,11 @@ class TodayPlanResponse(BaseModel):
     daily_plan: DailyPlanResponse | None = None
 
 
+class ActionableDailyPlanResponse(BaseModel):
+    date: date
+    daily_plan: DailyPlanResponse | None = None
+
+
 class DailyTaskStatusUpdateRequest(BaseModel):
     status: DailyTaskStatus
 
