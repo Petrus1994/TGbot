@@ -615,22 +615,47 @@ class DailyTaskDetailingService:
             for step in steps:
                 if not isinstance(step, dict):
                     continue
+
                 step_copy = deepcopy(step)
+
+                if step_copy.get("order") is not None:
+                    try:
+                        step_copy["order"] = max(1, int(step_copy["order"]))
+                    except Exception:
+                        step_copy["order"] = 1
+                else:
+                    step_copy["order"] = 1
+
+                if step_copy.get("duration_minutes") is not None:
+                    try:
+                        duration = int(step_copy["duration_minutes"])
+                        step_copy["duration_minutes"] = duration if duration >= 1 else None
+                    except Exception:
+                        step_copy["duration_minutes"] = None
+
+                if step_copy.get("sets") is not None:
+                    try:
+                        sets = int(step_copy["sets"])
+                        step_copy["sets"] = sets if sets >= 1 else None
+                    except Exception:
+                        step_copy["sets"] = None
+
+                if step_copy.get("reps") is not None:
+                    try:
+                        reps = int(step_copy["reps"])
+                        step_copy["reps"] = reps if reps >= 1 else None
+                    except Exception:
+                        step_copy["reps"] = None
 
                 if step_copy.get("rest_seconds") is not None:
                     try:
-                        step_copy["rest_seconds"] = max(0, int(step_copy["rest_seconds"]))
+                        rest = int(step_copy["rest_seconds"])
+                        step_copy["rest_seconds"] = rest if rest >= 0 else None
                     except Exception:
                         step_copy["rest_seconds"] = None
 
-                for field_name in ("order", "duration_minutes", "sets", "reps"):
-                    if step_copy.get(field_name) is not None:
-                        try:
-                            step_copy[field_name] = int(step_copy[field_name])
-                        except Exception:
-                            step_copy[field_name] = None
-
                 fixed_steps.append(step_copy)
+
             normalized["steps"] = fixed_steps
 
         return normalized
