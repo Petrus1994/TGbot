@@ -61,7 +61,8 @@ class DailyTaskDetailingService:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            parsed = AIDailyChecklistResponse.model_validate(raw_response)
+            normalized_response = self._normalize_ai_daily_checklist_payload(raw_response)
+            parsed = AIDailyChecklistResponse.model_validate(normalized_response)
             self._validate_ai_daily_checklist(
                 ai_response=parsed,
                 raw_tasks_count=len(raw_tasks),
@@ -174,8 +175,6 @@ class DailyTaskDetailingService:
                     raise ValueError("proof_required task must have proof_prompt")
 
             if task.detail_level == 1:
-                # Для простых задач steps не обязательны.
-                # Но задача всё равно должна быть конкретной и измеримой.
                 if task.task_type in {"fitness", "music", "speech", "drawing", "meditation", "rehab"}:
                     raise ValueError(
                         f"{task.task_type} task cannot use detail_level 1"
@@ -410,12 +409,15 @@ class DailyTaskDetailingService:
             return []
 
         if detail_level == 2:
+            first_block = max(5, estimated_minutes // 2)
+            second_block = max(5, estimated_minutes - first_block)
+
             return [
                 {
                     "order": 1,
                     "title": "Start the task",
                     "instruction": instructions,
-                    "duration_minutes": max(5, estimated_minutes // 2),
+                    "duration_minutes": first_block,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": None,
@@ -425,7 +427,7 @@ class DailyTaskDetailingService:
                     "order": 2,
                     "title": "Finish and verify",
                     "instruction": f"Complete the task and verify the result for: {title}",
-                    "duration_minutes": max(5, estimated_minutes - max(5, estimated_minutes // 2)),
+                    "duration_minutes": second_block,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": None,
@@ -433,14 +435,16 @@ class DailyTaskDetailingService:
                 },
             ]
 
-        # detail_level == 3
         if task_type == "fitness":
+            warmup_minutes = min(5, estimated_minutes)
+            main_minutes = max(5, estimated_minutes - warmup_minutes)
+
             return [
                 {
                     "order": 1,
                     "title": "Warm-up",
                     "instruction": "Do a short easy warm-up and prepare for the main work.",
-                    "duration_minutes": min(5, estimated_minutes),
+                    "duration_minutes": warmup_minutes,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": None,
@@ -450,7 +454,7 @@ class DailyTaskDetailingService:
                     "order": 2,
                     "title": "Main block",
                     "instruction": instructions,
-                    "duration_minutes": max(5, estimated_minutes - 5),
+                    "duration_minutes": main_minutes,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": 30,
@@ -459,12 +463,16 @@ class DailyTaskDetailingService:
             ]
 
         if task_type == "music":
+            warmup_minutes = min(5, estimated_minutes)
+            technical_minutes = max(5, estimated_minutes // 2)
+            application_minutes = max(5, estimated_minutes - warmup_minutes - technical_minutes)
+
             return [
                 {
                     "order": 1,
                     "title": "Warm-up",
                     "instruction": "Start with an easy warm-up to prepare hands and coordination.",
-                    "duration_minutes": min(5, estimated_minutes),
+                    "duration_minutes": warmup_minutes,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": None,
@@ -474,7 +482,7 @@ class DailyTaskDetailingService:
                     "order": 2,
                     "title": "Technical block",
                     "instruction": instructions,
-                    "duration_minutes": max(5, estimated_minutes // 2),
+                    "duration_minutes": technical_minutes,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": None,
@@ -484,7 +492,7 @@ class DailyTaskDetailingService:
                     "order": 3,
                     "title": "Application block",
                     "instruction": "Apply the practiced skill in a short controlled run-through.",
-                    "duration_minutes": max(5, estimated_minutes - min(5, estimated_minutes) - max(5, estimated_minutes // 2)),
+                    "duration_minutes": application_minutes,
                     "sets": None,
                     "reps": None,
                     "rest_seconds": None,
@@ -492,12 +500,15 @@ class DailyTaskDetailingService:
                 },
             ]
 
+        setup_minutes = min(5, estimated_minutes)
+        main_minutes = max(5, estimated_minutes - setup_minutes)
+
         return [
             {
                 "order": 1,
                 "title": "Setup",
                 "instruction": "Prepare for the practice session.",
-                "duration_minutes": min(5, estimated_minutes),
+                "duration_minutes": setup_minutes,
                 "sets": None,
                 "reps": None,
                 "rest_seconds": None,
@@ -507,7 +518,7 @@ class DailyTaskDetailingService:
                 "order": 2,
                 "title": "Main practice",
                 "instruction": instructions,
-                "duration_minutes": max(5, estimated_minutes - min(5, estimated_minutes)),
+                "duration_minutes": main_minutes,
                 "sets": None,
                 "reps": None,
                 "rest_seconds": None,
@@ -531,3 +542,232 @@ class DailyTaskDetailingService:
             return str(must_tasks[0].get("title"))
 
         return str(tasks[0].get("title"))
+
+    def _normalize_ai_daily_checklist_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+
+        normalized = deepcopy(payload)
+
+        tasks = normalized.get("tasks")
+        if not isinstance(tasks, list):
+            return normalized
+
+        normalized_tasks: list[dict[str, Any]] = []
+
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            normalized_tasks.append(self._normalize_ai_task_payload(task))
+
+        normalized["tasks"] = normalized_tasks
+        return normalized
+
+    def _normalize_ai_task_payload(
+        self,
+        task: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = deepcopy(task)
+
+        normalized["task_type"] = self._normalize_task_type(
+            normalized.get("task_type")
+        )
+        normalized["bucket"] = self._normalize_bucket(
+            normalized.get("bucket")
+        )
+        normalized["priority"] = self._normalize_priority(
+            normalized.get("priority")
+        )
+        normalized["difficulty"] = self._normalize_difficulty(
+            normalized.get("difficulty")
+        )
+        normalized["recommended_proof_type"] = self._normalize_proof_type(
+            normalized.get("recommended_proof_type")
+        )
+
+        detail_level = normalized.get("detail_level")
+        try:
+            normalized["detail_level"] = int(detail_level)
+        except Exception:
+            normalized["detail_level"] = self._default_detail_level_for_task_type(
+                normalized["task_type"]
+            )
+
+        resources = normalized.get("resources")
+        if isinstance(resources, list):
+            fixed_resources: list[dict[str, Any]] = []
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
+                resource_copy = deepcopy(resource)
+                resource_copy["resource_type"] = self._normalize_resource_type(
+                    resource_copy.get("resource_type")
+                )
+                fixed_resources.append(resource_copy)
+            normalized["resources"] = fixed_resources
+
+        steps = normalized.get("steps")
+        if isinstance(steps, list):
+            fixed_steps: list[dict[str, Any]] = []
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_copy = deepcopy(step)
+
+                if step_copy.get("rest_seconds") is not None:
+                    try:
+                        step_copy["rest_seconds"] = max(0, int(step_copy["rest_seconds"]))
+                    except Exception:
+                        step_copy["rest_seconds"] = None
+
+                for field_name in ("order", "duration_minutes", "sets", "reps"):
+                    if step_copy.get(field_name) is not None:
+                        try:
+                            step_copy[field_name] = int(step_copy[field_name])
+                        except Exception:
+                            step_copy[field_name] = None
+
+                fixed_steps.append(step_copy)
+            normalized["steps"] = fixed_steps
+
+        return normalized
+
+    def _normalize_task_type(self, value: Any) -> str:
+        allowed = {
+            "fitness",
+            "music",
+            "language",
+            "study",
+            "work",
+            "habit",
+            "speech",
+            "drawing",
+            "meditation",
+            "rehab",
+            "nutrition",
+            "activity",
+            "generic",
+        }
+
+        if value is None:
+            return "generic"
+
+        text = str(value).strip().lower()
+
+        mapping = {
+            "planning": "work",
+            "tracking": "habit",
+            "exercise": "fitness",
+            "workout": "fitness",
+            "instrument": "music",
+            "practice": "study",
+            "learning": "study",
+            "productivity": "work",
+            "organization": "work",
+            "health": "habit",
+            "wellness": "habit",
+        }
+
+        normalized = mapping.get(text, text)
+        return normalized if normalized in allowed else "generic"
+
+    def _normalize_bucket(self, value: Any) -> str:
+        allowed = {"must", "should", "bonus"}
+
+        if value is None:
+            return "must"
+
+        text = str(value).strip().lower()
+        mapping = {
+            "required": "must",
+            "core": "must",
+            "important": "must",
+            "optional": "bonus",
+            "extra": "bonus",
+            "nice_to_have": "should",
+        }
+
+        normalized = mapping.get(text, text)
+        return normalized if normalized in allowed else "must"
+
+    def _normalize_priority(self, value: Any) -> str:
+        allowed = {"high", "medium", "low"}
+
+        if value is None:
+            return "medium"
+
+        text = str(value).strip().lower()
+        mapping = {
+            "urgent": "high",
+            "critical": "high",
+            "normal": "medium",
+            "standard": "medium",
+            "optional": "low",
+        }
+
+        normalized = mapping.get(text, text)
+        return normalized if normalized in allowed else "medium"
+
+    def _normalize_difficulty(self, value: Any) -> str | None:
+        allowed = {"easy", "medium", "hard"}
+
+        if value is None:
+            return None
+
+        text = str(value).strip().lower()
+        mapping = {
+            "beginner": "easy",
+            "light": "easy",
+            "moderate": "medium",
+            "intermediate": "medium",
+            "advanced": "hard",
+            "difficult": "hard",
+        }
+
+        normalized = mapping.get(text, text)
+        return normalized if normalized in allowed else None
+
+    def _normalize_proof_type(self, value: Any) -> str | None:
+        allowed = {"text", "photo", "screenshot", "file", "video"}
+
+        if value is None:
+            return None
+
+        text = str(value).strip().lower()
+        mapping = {
+            "image": "photo",
+            "picture": "photo",
+            "screen": "screenshot",
+            "doc": "file",
+            "document": "file",
+        }
+
+        normalized = mapping.get(text, text)
+        return normalized if normalized in allowed else None
+
+    def _normalize_resource_type(self, value: Any) -> str:
+        allowed = {"video", "article", "reference", "checklist", "tool"}
+
+        if value is None:
+            return "reference"
+
+        text = str(value).strip().lower()
+        mapping = {
+            "app": "tool",
+            "template": "checklist",
+            "guide": "reference",
+            "tutorial": "video",
+        }
+
+        normalized = mapping.get(text, text)
+        return normalized if normalized in allowed else "reference"
+
+    def _default_detail_level_for_task_type(self, task_type: str) -> int:
+        if task_type in {"fitness", "music", "speech", "drawing", "meditation", "rehab"}:
+            return 3
+        if task_type in {"language", "study", "work", "nutrition", "activity"}:
+            return 2
+        return 1
