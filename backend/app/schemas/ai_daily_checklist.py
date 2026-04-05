@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
 
-ALLOWED_RESOURCE_TYPES = {"video", "article", "reference", "checklist"}
+ALLOWED_RESOURCE_TYPES = {"video", "article", "reference", "checklist", "tool"}
 ALLOWED_TASK_TYPES = {
     "fitness",
     "music",
@@ -13,6 +13,8 @@ ALLOWED_TASK_TYPES = {
     "drawing",
     "meditation",
     "rehab",
+    "nutrition",
+    "activity",
     "generic",
 }
 ALLOWED_DIFFICULTIES = {"easy", "medium", "hard"}
@@ -54,11 +56,18 @@ class AIDailyTaskStep(BaseModel):
             raise ValueError("duration_minutes must be >= 1")
         return value
 
-    @field_validator("sets", "reps", "rest_seconds")
+    @field_validator("sets", "reps")
     @classmethod
     def validate_positive_ints(cls, value: int | None) -> int | None:
         if value is not None and value < 1:
             raise ValueError("numeric field must be >= 1")
+        return value
+
+    @field_validator("rest_seconds")
+    @classmethod
+    def validate_rest_seconds(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("rest_seconds must be >= 0")
         return value
 
 
