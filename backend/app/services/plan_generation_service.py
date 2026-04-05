@@ -15,7 +15,6 @@ from app.core.exceptions import (
 from app.db import engine
 from app.schemas.ai_plan_v2 import AIPlanResponseV2
 from app.schemas.goal_generation import GoalGenerationContext
-from app.services.daily_task_detailing_service import DailyTaskDetailingService
 from app.services.openai_client import OpenAIClient
 from app.services.plan_prompt_builder import PlanPromptBuilder
 from app.services.plan_service import save_generated_plan
@@ -28,7 +27,6 @@ class PlanGenerationService:
             api_key=settings.openai_api_key,
             model=settings.openai_model,
         )
-        self.daily_task_detailing_service = DailyTaskDetailingService()
 
     async def generate_plan(self, goal_id: str, regenerate: bool = False):
         if not settings.ai_plan_generation_enabled:
@@ -61,11 +59,9 @@ Do not mix languages.
             response_language=response_language,
         )
 
-        plan_payload = await self._map_to_plan_payload(
+        plan_payload = self._map_to_plan_payload(
             goal_id=goal_id,
             ai_response=ai_response,
-            context=context,
-            response_language=response_language,
         )
 
         return save_generated_plan(
@@ -287,7 +283,9 @@ Do not mix languages.
 
             if task.cadence_type == "daily":
                 if task.cadence_config != {}:
-                    raise AIResponseValidationError("ai_task_daily_cadence_config_must_be_empty")
+                    raise AIResponseValidationError(
+                        "ai_task_daily_cadence_config_must_be_empty"
+                    )
 
             if task.cadence_type == "weekly":
                 times_per_week = task.cadence_config.get("times_per_week")
@@ -301,13 +299,11 @@ Do not mix languages.
                 if not all(isinstance(day, int) and 1 <= day <= 7 for day in days_of_week):
                     raise AIResponseValidationError("ai_task_days_of_week_out_of_range")
 
-    async def _map_to_plan_payload(
+    def _map_to_plan_payload(
         self,
         *,
         goal_id: str,
         ai_response: AIPlanResponseV2,
-        context: GoalGenerationContext,
-        response_language: str,
     ) -> dict:
         recurring_tasks = [
             {
@@ -325,17 +321,6 @@ Do not mix languages.
 
         days = self._build_daily_days(ai_response=ai_response)
         print(f"🔥 GENERATED BASE DAYS COUNT: {len(days)}")
-
-        try:
-            days = await self.daily_task_detailing_service.enrich_days(
-                context=context,
-                days=days,
-                response_language=response_language,
-            )
-            print(f"🔥 ENRICHED DAYS COUNT: {len(days)}")
-        except Exception as e:
-            print(f"⚠️ DAILY TASK DETAILING FAILED FOR PLAN: {e}")
-            # Не валим весь flow. Оставляем базовые days.
 
         content = {
             "duration_weeks": ai_response.duration_weeks,

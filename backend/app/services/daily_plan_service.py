@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -15,6 +16,8 @@ from app.schemas.daily_plan import (
     DailyTaskStepResponse,
     GeneratedDailyPlan,
 )
+from app.schemas.goal_generation import GoalGenerationContext
+from app.services.daily_task_detailing_service import DailyTaskDetailingService
 
 
 def _parse_date(value: Any) -> date | None:
@@ -45,11 +48,16 @@ def _parse_task_steps(value: Any) -> list[DailyTaskStepResponse]:
         if not isinstance(item, dict):
             continue
 
+        title = str(item.get("title") or "").strip()
+        instruction = str(item.get("instruction") or "").strip()
+        if not title or not instruction:
+            continue
+
         parsed_steps.append(
             DailyTaskStepResponse(
                 order=int(item.get("order") or 1),
-                title=str(item.get("title") or ""),
-                instruction=str(item.get("instruction") or ""),
+                title=title,
+                instruction=instruction,
                 duration_minutes=item.get("duration_minutes"),
                 sets=item.get("sets"),
                 reps=item.get("reps"),
@@ -75,7 +83,6 @@ def _parse_task_resources(value: Any) -> list[DailyTaskResourceResponse]:
 
         title = str(item.get("title") or "").strip()
         resource_type = str(item.get("resource_type") or "").strip()
-
         if not title or not resource_type:
             continue
 
@@ -316,9 +323,7 @@ def create_daily_plans_for_goal(
         )
 
         for day in generated_days:
-            parsed_planned_date = _parse_date(day.planned_date)
-            if not parsed_planned_date:
-                parsed_planned_date = date.today()
+            parsed_planned_date = _parse_date(day.planned_date) or date.today()
 
             total_estimated_minutes = day.total_estimated_minutes
             if total_estimated_minutes is None:
@@ -367,20 +372,14 @@ def create_daily_plans_for_goal(
                         "proof_prompt": task.proof_prompt,
                         "task_type": task.task_type,
                         "difficulty": task.difficulty,
-                        "tips": __import__("json").dumps(task.tips, ensure_ascii=False),
-                        "technique_cues": __import__("json").dumps(
-                            task.technique_cues,
-                            ensure_ascii=False,
-                        ),
-                        "common_mistakes": __import__("json").dumps(
-                            task.common_mistakes,
-                            ensure_ascii=False,
-                        ),
-                        "steps": __import__("json").dumps(
+                        "tips": json.dumps(task.tips, ensure_ascii=False),
+                        "technique_cues": json.dumps(task.technique_cues, ensure_ascii=False),
+                        "common_mistakes": json.dumps(task.common_mistakes, ensure_ascii=False),
+                        "steps": json.dumps(
                             [step.model_dump() for step in task.steps],
                             ensure_ascii=False,
                         ),
-                        "resources": __import__("json").dumps(
+                        "resources": json.dumps(
                             [resource.model_dump() for resource in task.resources],
                             ensure_ascii=False,
                         ),
@@ -737,3 +736,316 @@ def update_daily_plan_status(
             return None
 
         return _build_daily_plan_response(conn, row)
+
+
+def _daily_plan_needs_detailing(plan: DailyPlanResponse) -> bool:
+    if not plan.headline:
+        return True
+    if not plan.main_task_title:
+        return True
+    if plan.total_estimated_minutes is None:
+        return True
+    if not plan.tasks:
+        return True
+
+    for task in plan.tasks:
+        if task.is_required:
+            if not task.why_today:
+                return True
+            if not task.success_criteria:
+                return True
+            if task.detail_level >= 2 and not task.steps:
+                return True
+
+    return False
+
+
+def _normalize_text_field(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(items) if items else None
+
+    if isinstance(value, dict):
+        parts = []
+        for key, item in value.items():
+            key_str = str(key).strip()
+            item_str = str(item).strip()
+            if key_str and item_str:
+                parts.append(f"{key_str}: {item_str}")
+        return "; ".join(parts) if parts else None
+
+    value = str(value).strip()
+    return value or None
+
+
+def _pick_first_non_empty(*values: Any) -> str | None:
+    for value in values:
+        normalized = _normalize_text_field(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _infer_response_language(context: GoalGenerationContext) -> str:
+    text_parts = [
+        context.goal_title,
+        context.goal_description,
+        context.current_level,
+        context.constraints,
+        context.resources,
+        context.motivation,
+        context.coach_style,
+    ]
+    combined = " ".join(part for part in text_parts if part)
+
+    for ch in combined:
+        if "А" <= ch <= "я" or ch in {"Ё", "ё"}:
+            return "Russian"
+    return "English"
+
+
+def _load_goal_generation_context(goal_id: str) -> GoalGenerationContext:
+    with engine.begin() as connection:
+        goal = connection.execute(
+            text(
+                """
+                SELECT id, user_id, title, description
+                FROM goals
+                WHERE id = :goal_id
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not goal:
+            raise ValueError("goal_not_found")
+
+        session = connection.execute(
+            text(
+                """
+                SELECT context_json
+                FROM goal_sessions
+                WHERE goal_id = :goal_id
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not session:
+            raise ValueError("profiling_not_started")
+
+        context_json = session["context_json"] or {}
+        if not isinstance(context_json, dict):
+            context_json = {}
+
+        profiling = context_json.get("profiling", {})
+        if not isinstance(profiling, dict):
+            profiling = {}
+
+        profiling_summary = profiling.get("summary", {})
+        if not isinstance(profiling_summary, dict):
+            profiling_summary = {}
+
+        answers = profiling.get("answers", {})
+        if not isinstance(answers, dict):
+            answers = {}
+
+        current_level = _pick_first_non_empty(
+            profiling_summary.get("current_state"),
+            profiling_summary.get("current_level"),
+            answers.get("current_state"),
+            answers.get("current_level"),
+        )
+        constraints = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("constraints"),
+                answers.get("constraints"),
+            )
+        )
+        resources = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("resources"),
+                answers.get("resources"),
+            )
+        )
+        motivation = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("motivation"),
+                answers.get("motivation"),
+            )
+        )
+        coach_style = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("coach_style"),
+                answers.get("coach_style"),
+            )
+        )
+
+        return GoalGenerationContext(
+            goal_id=str(goal["id"]),
+            user_id=str(goal["user_id"]),
+            goal_title=goal.get("title") or "Untitled goal",
+            goal_description=goal.get("description"),
+            current_level=current_level,
+            constraints=constraints,
+            resources=resources,
+            motivation=motivation,
+            coach_style=coach_style,
+        )
+
+
+def _build_day_payload_from_plan(plan: DailyPlanResponse) -> dict[str, Any]:
+    return {
+        "day_number": plan.day_number,
+        "planned_date": plan.planned_date.isoformat() if plan.planned_date else None,
+        "focus": plan.focus,
+        "summary": plan.summary,
+        "headline": plan.headline,
+        "focus_message": plan.focus_message,
+        "main_task_title": plan.main_task_title,
+        "total_estimated_minutes": plan.total_estimated_minutes,
+        "tasks": [
+            {
+                "title": task.title,
+                "description": task.description,
+                "objective": task.objective,
+                "instructions": task.instructions,
+                "why_today": task.why_today,
+                "success_criteria": task.success_criteria,
+                "estimated_minutes": task.estimated_minutes,
+                "detail_level": task.detail_level,
+                "bucket": task.bucket,
+                "priority": task.priority,
+                "is_required": task.is_required,
+                "proof_required": task.proof_required,
+                "recommended_proof_type": task.recommended_proof_type,
+                "proof_prompt": task.proof_prompt,
+                "task_type": task.task_type,
+                "difficulty": task.difficulty,
+                "tips": task.tips,
+                "technique_cues": task.technique_cues,
+                "common_mistakes": task.common_mistakes,
+                "steps": [step.model_dump() for step in task.steps],
+                "resources": [resource.model_dump() for resource in task.resources],
+            }
+            for task in plan.tasks
+        ],
+    }
+
+
+def _update_detailed_daily_plan(
+    daily_plan_id: str,
+    detailed_day: dict[str, Any],
+) -> None:
+    tasks = detailed_day.get("tasks", [])
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE daily_plans
+                SET headline = :headline,
+                    focus_message = :focus_message,
+                    main_task_title = :main_task_title,
+                    total_estimated_minutes = :total_estimated_minutes,
+                    updated_at = NOW()
+                WHERE id = :daily_plan_id
+                """
+            ),
+            {
+                "daily_plan_id": daily_plan_id,
+                "headline": detailed_day.get("headline"),
+                "focus_message": detailed_day.get("focus_message"),
+                "main_task_title": detailed_day.get("main_task_title"),
+                "total_estimated_minutes": detailed_day.get("total_estimated_minutes"),
+            },
+        )
+
+        for index, task in enumerate(tasks, start=1):
+            conn.execute(
+                text(
+                    """
+                    UPDATE daily_tasks
+                    SET
+                        title = :title,
+                        objective = :objective,
+                        description = :description,
+                        instructions = :instructions,
+                        why_today = :why_today,
+                        success_criteria = :success_criteria,
+                        estimated_minutes = :estimated_minutes,
+                        detail_level = :detail_level,
+                        bucket = :bucket,
+                        priority = :priority,
+                        is_required = :is_required,
+                        proof_required = :proof_required,
+                        recommended_proof_type = :recommended_proof_type,
+                        proof_prompt = :proof_prompt,
+                        task_type = :task_type,
+                        difficulty = :difficulty,
+                        tips = CAST(:tips AS JSONB),
+                        technique_cues = CAST(:technique_cues AS JSONB),
+                        common_mistakes = CAST(:common_mistakes AS JSONB),
+                        steps = CAST(:steps AS JSONB),
+                        resources = CAST(:resources AS JSONB),
+                        updated_at = NOW()
+                    WHERE daily_plan_id = :daily_plan_id
+                      AND order_index = :order_index
+                    """
+                ),
+                {
+                    "daily_plan_id": daily_plan_id,
+                    "order_index": index,
+                    "title": task.get("title"),
+                    "objective": task.get("objective"),
+                    "description": task.get("description"),
+                    "instructions": task.get("instructions"),
+                    "why_today": task.get("why_today"),
+                    "success_criteria": task.get("success_criteria"),
+                    "estimated_minutes": task.get("estimated_minutes"),
+                    "detail_level": task.get("detail_level", 1),
+                    "bucket": task.get("bucket", "must"),
+                    "priority": task.get("priority", "medium"),
+                    "is_required": bool(task.get("is_required", True)),
+                    "proof_required": bool(task.get("proof_required", False)),
+                    "recommended_proof_type": task.get("recommended_proof_type"),
+                    "proof_prompt": task.get("proof_prompt"),
+                    "task_type": task.get("task_type"),
+                    "difficulty": task.get("difficulty"),
+                    "tips": json.dumps(task.get("tips", []), ensure_ascii=False),
+                    "technique_cues": json.dumps(task.get("technique_cues", []), ensure_ascii=False),
+                    "common_mistakes": json.dumps(task.get("common_mistakes", []), ensure_ascii=False),
+                    "steps": json.dumps(task.get("steps", []), ensure_ascii=False),
+                    "resources": json.dumps(task.get("resources", []), ensure_ascii=False),
+                },
+            )
+
+
+async def enrich_today_plan_if_needed(
+    goal_id: str,
+    today_date: date | None = None,
+) -> DailyPlanResponse | None:
+    plan = get_today_plan(goal_id, today_date=today_date)
+    if not plan:
+        return None
+
+    if not _daily_plan_needs_detailing(plan):
+        return plan
+
+    context = _load_goal_generation_context(goal_id)
+    response_language = _infer_response_language(context)
+    day_payload = _build_day_payload_from_plan(plan)
+
+    detailing_service = DailyTaskDetailingService()
+    detailed_day = await detailing_service.enrich_single_day(
+        context=context,
+        day=day_payload,
+        response_language=response_language,
+    )
+
+    _update_detailed_daily_plan(plan.id, detailed_day)
+
+    return get_today_plan(goal_id, today_date=today_date)
