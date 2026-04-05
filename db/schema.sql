@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_telegram_chat_id ON users (telegram_chat_id);
 CREATE INDEX IF NOT EXISTS idx_users_status ON users (status);
 
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
 CREATE TRIGGER trg_users_updated_at
 BEFORE UPDATE ON users
 FOR EACH ROW
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 
 CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles (user_id);
 
+DROP TRIGGER IF EXISTS trg_user_profiles_updated_at ON user_profiles;
 CREATE TRIGGER trg_user_profiles_updated_at
 BEFORE UPDATE ON user_profiles
 FOR EACH ROW
@@ -118,6 +120,7 @@ CREATE INDEX IF NOT EXISTS idx_goals_status ON goals (status);
 CREATE INDEX IF NOT EXISTS idx_goals_user_status ON goals (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_goals_target_date ON goals (target_date);
 
+DROP TRIGGER IF EXISTS trg_goals_updated_at ON goals;
 CREATE TRIGGER trg_goals_updated_at
 BEFORE UPDATE ON goals
 FOR EACH ROW
@@ -157,6 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_goal_sessions_user_id ON goal_sessions (user_id);
 CREATE INDEX IF NOT EXISTS idx_goal_sessions_goal_id ON goal_sessions (goal_id);
 CREATE INDEX IF NOT EXISTS idx_goal_sessions_state ON goal_sessions (state);
 
+DROP TRIGGER IF EXISTS trg_goal_sessions_updated_at ON goal_sessions;
 CREATE TRIGGER trg_goal_sessions_updated_at
 BEFORE UPDATE ON goal_sessions
 FOR EACH ROW
@@ -180,6 +184,7 @@ CREATE TABLE IF NOT EXISTS user_chat_context (
 CREATE INDEX IF NOT EXISTS idx_user_chat_context_user_id ON user_chat_context (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_chat_context_active_goal_id ON user_chat_context (active_goal_id);
 
+DROP TRIGGER IF EXISTS trg_user_chat_context_updated_at ON user_chat_context;
 CREATE TRIGGER trg_user_chat_context_updated_at
 BEFORE UPDATE ON user_chat_context
 FOR EACH ROW
@@ -210,6 +215,7 @@ CREATE INDEX IF NOT EXISTS idx_plans_goal_id ON plans (goal_id);
 CREATE INDEX IF NOT EXISTS idx_plans_goal_status ON plans (goal_id, status);
 CREATE INDEX IF NOT EXISTS idx_plans_status ON plans (status);
 
+DROP TRIGGER IF EXISTS trg_plans_updated_at ON plans;
 CREATE TRIGGER trg_plans_updated_at
 BEFORE UPDATE ON plans
 FOR EACH ROW
@@ -247,8 +253,99 @@ CREATE TABLE IF NOT EXISTS plan_steps (
 CREATE INDEX IF NOT EXISTS idx_plan_steps_plan_id ON plan_steps (plan_id);
 CREATE INDEX IF NOT EXISTS idx_plan_steps_frequency_type ON plan_steps (frequency_type);
 
+DROP TRIGGER IF EXISTS trg_plan_steps_updated_at ON plan_steps;
 CREATE TRIGGER trg_plan_steps_updated_at
 BEFORE UPDATE ON plan_steps
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- =========================================================
+-- daily_plans
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS daily_plans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  goal_id UUID NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  day_number INTEGER NOT NULL CHECK (day_number > 0),
+  planned_date DATE,
+  focus TEXT,
+  summary TEXT,
+  headline TEXT,
+  focus_message TEXT,
+  main_task_title TEXT,
+  total_estimated_minutes INTEGER CHECK (total_estimated_minutes IS NULL OR total_estimated_minutes >= 0),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'in_progress', 'done', 'skipped')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (goal_id, day_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_plans_goal_id ON daily_plans (goal_id);
+CREATE INDEX IF NOT EXISTS idx_daily_plans_goal_day ON daily_plans (goal_id, day_number);
+CREATE INDEX IF NOT EXISTS idx_daily_plans_goal_planned_date ON daily_plans (goal_id, planned_date);
+CREATE INDEX IF NOT EXISTS idx_daily_plans_status ON daily_plans (status);
+
+DROP TRIGGER IF EXISTS trg_daily_plans_updated_at ON daily_plans;
+CREATE TRIGGER trg_daily_plans_updated_at
+BEFORE UPDATE ON daily_plans
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- =========================================================
+-- daily_tasks
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS daily_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  daily_plan_id UUID NOT NULL REFERENCES daily_plans(id) ON DELETE CASCADE,
+  goal_id UUID NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+
+  title TEXT NOT NULL,
+  objective TEXT,
+  description TEXT,
+  instructions TEXT,
+  why_today TEXT,
+  success_criteria TEXT,
+
+  estimated_minutes INTEGER CHECK (estimated_minutes IS NULL OR estimated_minutes >= 0),
+  detail_level INTEGER NOT NULL DEFAULT 1 CHECK (detail_level >= 1),
+
+  bucket TEXT,
+  priority TEXT,
+  order_index INTEGER NOT NULL CHECK (order_index > 0),
+
+  is_required BOOLEAN NOT NULL DEFAULT TRUE,
+  proof_required BOOLEAN NOT NULL DEFAULT FALSE,
+  recommended_proof_type TEXT,
+  proof_prompt TEXT,
+
+  task_type TEXT,
+  difficulty TEXT,
+
+  tips JSONB NOT NULL DEFAULT '[]'::jsonb,
+  technique_cues JSONB NOT NULL DEFAULT '[]'::jsonb,
+  common_mistakes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+  resources JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'in_progress', 'done', 'skipped')),
+  completed_at TIMESTAMPTZ,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  UNIQUE (daily_plan_id, order_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_tasks_daily_plan_id ON daily_tasks (daily_plan_id);
+CREATE INDEX IF NOT EXISTS idx_daily_tasks_goal_id ON daily_tasks (goal_id);
+CREATE INDEX IF NOT EXISTS idx_daily_tasks_status ON daily_tasks (status);
+
+DROP TRIGGER IF EXISTS trg_daily_tasks_updated_at ON daily_tasks;
+CREATE TRIGGER trg_daily_tasks_updated_at
+BEFORE UPDATE ON daily_tasks
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
@@ -288,6 +385,7 @@ CREATE INDEX IF NOT EXISTS idx_daily_checkins_checkin_date ON daily_checkins (ch
 CREATE INDEX IF NOT EXISTS idx_daily_checkins_goal_date ON daily_checkins (goal_id, checkin_date);
 CREATE INDEX IF NOT EXISTS idx_daily_checkins_status ON daily_checkins (status);
 
+DROP TRIGGER IF EXISTS trg_daily_checkins_updated_at ON daily_checkins;
 CREATE TRIGGER trg_daily_checkins_updated_at
 BEFORE UPDATE ON daily_checkins
 FOR EACH ROW
@@ -313,6 +411,7 @@ CREATE INDEX IF NOT EXISTS idx_step_reports_daily_checkin_id ON step_reports (da
 CREATE INDEX IF NOT EXISTS idx_step_reports_plan_step_id ON step_reports (plan_step_id);
 CREATE INDEX IF NOT EXISTS idx_step_reports_status ON step_reports (status);
 
+DROP TRIGGER IF EXISTS trg_step_reports_updated_at ON step_reports;
 CREATE TRIGGER trg_step_reports_updated_at
 BEFORE UPDATE ON step_reports
 FOR EACH ROW
@@ -408,6 +507,7 @@ CREATE INDEX IF NOT EXISTS idx_reminders_enabled ON reminders (enabled);
 CREATE INDEX IF NOT EXISTS idx_reminders_enabled_timezone_local_time
   ON reminders (enabled, timezone, local_time);
 
+DROP TRIGGER IF EXISTS trg_reminders_updated_at ON reminders;
 CREATE TRIGGER trg_reminders_updated_at
 BEFORE UPDATE ON reminders
 FOR EACH ROW

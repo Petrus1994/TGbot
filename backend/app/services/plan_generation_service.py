@@ -64,13 +64,17 @@ Do not mix languages.
             ai_response=ai_response,
         )
 
-        return save_generated_plan(
-            goal_id=goal_id,
-            title=plan_payload["title"],
-            summary=plan_payload["summary"],
-            content=plan_payload["content"],
-            status=plan_payload["status"],
-        )
+        try:
+            return save_generated_plan(
+                goal_id=goal_id,
+                title=plan_payload["title"],
+                summary=plan_payload["summary"],
+                content=plan_payload["content"],
+                status=plan_payload["status"],
+            )
+        except Exception as e:
+            print(f"❌ SAVE GENERATED PLAN ERROR: {e!r}")
+            raise AIPlanGenerationError(f"save_generated_plan_failed: {e}") from e
 
     async def _generate_with_retry(
         self,
