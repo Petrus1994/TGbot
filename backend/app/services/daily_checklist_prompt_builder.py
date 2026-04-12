@@ -39,6 +39,15 @@ It should match:
 3. DOMAIN ADAPTATION
 Adapt task shape by domain.
 
+Examples:
+- Fitness: exercises, sets, reps, rest, technique cues, mistakes
+- Language: exercise format, minutes, topic, output format, review loop
+- Money/business: outreach count, offer refinement, call prep, follow-up blocks
+- Career: application count, resume edits, portfolio piece, interview drills
+- Content: script, draft, record, edit, post, analytics review
+- Habits: trigger, action, fallback, environment design, tracking
+- Study: topic block, problem count, recall test, review loop
+
 4. TASK DESIGN
 Each task should ideally include:
 - title
@@ -73,6 +82,7 @@ Forbidden:
 - "be disciplined"
 - "give your best"
 - "stay consistent"
+unless attached to a concrete action, and even then keep it minimal.
 
 8. EXECUTION FIRST
 The output should feel like a capable operator prepared the user's day.
@@ -154,18 +164,19 @@ Add them when they improve actual execution quality.
 
 G. EFFORT SHAPING
 Use estimated_minutes realistically.
+Do not create a fake 8-hour productivity fantasy if the context suggests otherwise.
 
 H. PROOF
 If proof is required, make the proof prompt clear and easy to verify.
 
 RETURN JSON IN THIS SHAPE:
-{
+{{
   "headline": "string",
   "focus_message": "string or null",
   "main_task_title": "string or null",
   "total_estimated_minutes": 90,
   "tasks": [
-    {
+    {{
       "title": "string",
       "objective": "string or null",
       "description": "string or null",
@@ -187,9 +198,9 @@ RETURN JSON IN THIS SHAPE:
       "common_mistakes": [],
       "steps": [],
       "resources": []
-    }
+    }}
   ]
-}
+}}
 
 VALID ENUMS:
 - bucket: must, should, bonus
