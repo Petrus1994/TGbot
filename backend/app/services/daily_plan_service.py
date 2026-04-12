@@ -693,7 +693,8 @@ def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanRes
                 FROM daily_plans
                 WHERE goal_id = :goal_id
                   AND planned_date <= :today_date
-                ORDER BY day_number ASC
+                  AND status IN ('pending', 'in_progress')
+                ORDER BY planned_date DESC, day_number DESC
                 LIMIT 1
                 """
             ),
@@ -1075,6 +1076,10 @@ def _infer_response_language(context: GoalGenerationContext) -> str:
         context.resources,
         context.motivation,
         context.coach_style,
+        context.goal_outcome,
+        context.time_budget,
+        context.main_obstacles,
+        context.daily_routine,
     ]
     combined = " ".join(part for part in text_parts if part)
 
@@ -1089,7 +1094,7 @@ def _load_goal_generation_context(goal_id: str) -> GoalGenerationContext:
         goal = connection.execute(
             text(
                 """
-                SELECT id, user_id, title, description
+                SELECT id, user_id, title, description, target_date
                 FROM goals
                 WHERE id = :goal_id
                 """
@@ -1158,6 +1163,60 @@ def _load_goal_generation_context(goal_id: str) -> GoalGenerationContext:
             _pick_first_non_empty(
                 profiling_summary.get("coach_style"),
                 answers.get("coach_style"),
+                profiling_summary.get("preferred_execution_style"),
+                answers.get("preferred_execution_style"),
+            )
+        )
+
+        goal_outcome = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("goal_outcome"),
+                profiling_summary.get("success_metrics"),
+                answers.get("goal_outcome"),
+            )
+        )
+        deadline = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("deadline"),
+                answers.get("deadline"),
+                goal.get("target_date"),
+            )
+        )
+        time_budget = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("time_budget"),
+                answers.get("time_budget"),
+            )
+        )
+        past_attempts = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("past_attempts"),
+                answers.get("past_attempts"),
+            )
+        )
+        main_obstacles = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("main_obstacles"),
+                profiling_summary.get("risk_factors"),
+                answers.get("main_obstacles"),
+            )
+        )
+        daily_routine = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("daily_routine"),
+                answers.get("daily_routine"),
+            )
+        )
+        planning_notes = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("planning_notes"),
+                profiling_summary.get("environment"),
+                answers.get("planning_notes"),
+            )
+        )
+        plan_confidence = _normalize_text_field(
+            _pick_first_non_empty(
+                profiling_summary.get("plan_confidence"),
             )
         )
 
@@ -1171,6 +1230,16 @@ def _load_goal_generation_context(goal_id: str) -> GoalGenerationContext:
             resources=resources,
             motivation=motivation,
             coach_style=coach_style,
+            goal_outcome=goal_outcome,
+            deadline=deadline,
+            time_budget=time_budget,
+            past_attempts=past_attempts,
+            main_obstacles=main_obstacles,
+            daily_routine=daily_routine,
+            planning_notes=planning_notes,
+            plan_confidence=plan_confidence,
+            profiling_summary=profiling_summary,
+            profiling_answers=answers,
         )
 
 

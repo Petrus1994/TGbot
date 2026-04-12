@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -23,6 +24,16 @@ REQUIRED_PROFILING_KEYS = (
     "coach_style",
 )
 
+SUMMARY_COMPLETENESS_KEYS = (
+    "goal_outcome",
+    "current_state",
+    "constraints",
+    "resources",
+    "time_budget",
+    "main_obstacles",
+    "coach_style",
+)
+
 MAX_FOLLOW_UP_ATTEMPTS_PER_QUESTION = 2
 
 
@@ -30,7 +41,7 @@ def _get_goal(connection, goal_id: str):
     goal = connection.execute(
         text(
             """
-            SELECT id, user_id, title, description, status
+            SELECT id, user_id, title, description, status, target_date
             FROM goals
             WHERE id = :goal_id
             """
@@ -62,66 +73,76 @@ def _get_goal_session(connection, goal_id: str):
     return session
 
 
-def _normalize_context(context):
+def _normalize_context(context: Any) -> dict[str, Any]:
     return context if isinstance(context, dict) else {}
 
 
-def _get_profiling_block(context):
+def _get_profiling_block(context: dict[str, Any]) -> dict[str, Any]:
     profiling = context.get("profiling", {})
     return profiling if isinstance(profiling, dict) else {}
 
 
-def _get_questions(context):
+def _get_questions(context: dict[str, Any]) -> list[dict[str, Any]]:
     profiling = _get_profiling_block(context)
     questions = profiling.get("questions", [])
     return questions if isinstance(questions, list) else []
 
 
-def _get_answers(context):
+def _get_answers(context: dict[str, Any]) -> dict[str, str]:
     profiling = _get_profiling_block(context)
     answers = profiling.get("answers", {})
     if not isinstance(answers, dict):
         return {}
-    return {str(k): str(v) for k, v in answers.items()}
+    return {str(k): str(v).strip() for k, v in answers.items() if str(v).strip()}
 
 
-def _get_asked_question_keys(context):
+def _get_asked_question_keys(context: dict[str, Any]) -> list[str]:
     profiling = _get_profiling_block(context)
     keys = profiling.get("asked_question_keys", [])
     if not isinstance(keys, list):
         return []
-    return [str(x) for x in keys]
+    return [str(x) for x in keys if str(x).strip()]
 
 
-def _get_skipped_question_keys(context):
+def _get_skipped_question_keys(context: dict[str, Any]) -> list[str]:
     profiling = _get_profiling_block(context)
     keys = profiling.get("skipped_question_keys", [])
     if not isinstance(keys, list):
         return []
-    return [str(x) for x in keys]
+    return [str(x) for x in keys if str(x).strip()]
 
 
-def _get_follow_up_attempts(context):
+def _get_follow_up_attempts(context: dict[str, Any]) -> dict[str, int]:
     profiling = _get_profiling_block(context)
     attempts = profiling.get("follow_up_attempts", {})
     if not isinstance(attempts, dict):
         return {}
-    normalized = {}
+
+    normalized: dict[str, int] = {}
     for key, value in attempts.items():
         try:
-            normalized[str(key)] = int(value)
+            normalized[str(key)] = max(0, int(value))
         except Exception:
             normalized[str(key)] = 0
     return normalized
 
 
-def _get_current_question_key(context):
+def _get_current_question_key(context: dict[str, Any]) -> str | None:
     profiling = _get_profiling_block(context)
     value = profiling.get("current_question_key")
-    return str(value) if value else None
+    return str(value).strip() if value else None
 
 
-def _find_question_by_key(questions: list[dict], question_key: str | None) -> dict | None:
+def _get_summary(context: dict[str, Any]) -> dict[str, Any] | None:
+    profiling = _get_profiling_block(context)
+    summary = profiling.get("summary")
+    return summary if isinstance(summary, dict) else None
+
+
+def _find_question_by_key(
+    questions: list[dict[str, Any]],
+    question_key: str | None,
+) -> dict[str, Any] | None:
     if not question_key:
         return None
 
@@ -130,6 +151,27 @@ def _find_question_by_key(questions: list[dict], question_key: str | None) -> di
             return question
 
     return None
+
+
+def _normalize_text_field(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(items) if items else None
+
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            key_str = str(key).strip()
+            item_str = str(item).strip()
+            if key_str and item_str:
+                parts.append(f"{key_str}: {item_str}")
+        return "; ".join(parts) if parts else None
+
+    value_str = str(value).strip()
+    return value_str or None
 
 
 def _has_required_answers(answers: dict[str, str]) -> bool:
@@ -151,7 +193,20 @@ def _get_missing_required_keys(answers: dict[str, str]) -> list[str]:
     return missing_keys
 
 
-def _extract_question_meta(question: dict | None) -> dict:
+def _is_summary_complete(summary: dict[str, Any] | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+
+    for key in SUMMARY_COMPLETENESS_KEYS:
+        value = summary.get(key)
+        normalized = _normalize_text_field(value)
+        if not normalized:
+            return False
+
+    return True
+
+
+def _extract_question_meta(question: dict[str, Any] | None) -> dict[str, Any]:
     if not question:
         return {
             "question_type": "text",
@@ -160,11 +215,16 @@ def _extract_question_meta(question: dict | None) -> dict:
         }
 
     question_type = str(question.get("question_type") or "text").strip()
+
     suggested_options = question.get("suggested_options")
     if not isinstance(suggested_options, list):
         suggested_options = None
     else:
-        suggested_options = [str(option).strip() for option in suggested_options if str(option).strip()] or None
+        suggested_options = [
+            str(option).strip()
+            for option in suggested_options
+            if str(option).strip()
+        ] or None
 
     allow_free_text = question.get("allow_free_text")
     if not isinstance(allow_free_text, bool):
@@ -184,7 +244,7 @@ def _build_state_response(goal_id, state, substate, context, extra=None):
     follow_up_attempts = _get_follow_up_attempts(context)
     current_question_key = _get_current_question_key(context)
     current_question = _find_question_by_key(questions, current_question_key)
-    profiling_summary = profiling.get("summary")
+    profiling_summary = _get_summary(context)
 
     is_completed = bool(profiling.get("is_completed", False))
     question_meta = _extract_question_meta(current_question)
@@ -213,6 +273,76 @@ def _build_state_response(goal_id, state, substate, context, extra=None):
     return response
 
 
+def _apply_profiling_update(
+    connection,
+    *,
+    goal_id: str,
+    state: str,
+    substate: str | None,
+    context: dict[str, Any],
+) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE goal_sessions
+            SET state = :state,
+                substate = :substate,
+                context_json = CAST(:context_json AS jsonb),
+                updated_at = NOW()
+            WHERE goal_id = :goal_id
+            """
+        ),
+        {
+            "goal_id": goal_id,
+            "state": state,
+            "substate": substate,
+            "context_json": json.dumps(context, ensure_ascii=False),
+        },
+    )
+
+
+def _pick_forced_required_question(
+    questions: list[dict[str, Any]],
+    answers: dict[str, str],
+    asked_question_keys: list[str],
+) -> dict[str, Any] | None:
+    missing_keys = _get_missing_required_keys(answers)
+
+    for missing_key in missing_keys:
+        candidate = _find_question_by_key(questions, missing_key)
+        if candidate:
+            return candidate
+
+    for question in questions:
+        key = str(question.get("key") or "").strip()
+        if not key:
+            continue
+        if key in asked_question_keys:
+            continue
+        if key in REQUIRED_PROFILING_KEYS and key not in answers:
+            return question
+
+    return None
+
+
+async def _build_and_validate_summary(
+    *,
+    goal_title: str,
+    goal_description: str | None,
+    answers: dict[str, str],
+) -> dict[str, Any]:
+    summary = await profiling_summary_service.build_summary(
+        goal_title=goal_title,
+        goal_description=goal_description,
+        answers=answers,
+    )
+
+    if not isinstance(summary, dict):
+        raise HTTPException(status_code=500, detail="profiling_summary_invalid")
+
+    return summary
+
+
 async def start_profiling(goal_id: str) -> dict:
     with engine.begin() as connection:
         goal = _get_goal(connection, goal_id)
@@ -225,6 +355,7 @@ async def start_profiling(goal_id: str) -> dict:
         except Exception:
             raise HTTPException(status_code=500, detail="profiling_context_build_failed")
 
+        context = _normalize_context(context)
         profiling = _get_profiling_block(context)
         questions = _get_questions(context)
 
@@ -349,38 +480,33 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
         if not current_question:
             raise HTTPException(status_code=500, detail="current_question_not_found")
 
-        evaluation = await profiling_quality_service.evaluate_answer(
-            goal_title=goal["title"],
-            goal_description=goal.get("description"),
-            question=current_question,
-            answer=cleaned_answer,
-            answers=answers,
-        )
+        try:
+            evaluation = await profiling_quality_service.evaluate_answer(
+                goal_title=goal["title"],
+                goal_description=goal.get("description"),
+                question=current_question,
+                answer=cleaned_answer,
+                answers=answers,
+            )
+        except Exception:
+            raise HTTPException(status_code=500, detail="profiling_answer_evaluation_failed")
 
-        if not evaluation["accepted"]:
+        if not isinstance(evaluation, dict):
+            raise HTTPException(status_code=500, detail="profiling_answer_evaluation_invalid")
+
+        if not evaluation.get("accepted"):
             current_attempts = follow_up_attempts.get(current_question["key"], 0) + 1
             follow_up_attempts[current_question["key"]] = current_attempts
 
             profiling["follow_up_attempts"] = follow_up_attempts
             context["profiling"] = profiling
 
-            connection.execute(
-                text(
-                    """
-                    UPDATE goal_sessions
-                    SET state = :state,
-                        substate = :substate,
-                        context_json = CAST(:context_json AS jsonb),
-                        updated_at = NOW()
-                    WHERE goal_id = :goal_id
-                    """
-                ),
-                {
-                    "goal_id": goal_id,
-                    "state": session["state"],
-                    "substate": session["substate"],
-                    "context_json": json.dumps(context, ensure_ascii=False),
-                },
+            _apply_profiling_update(
+                connection,
+                goal_id=goal_id,
+                state=session["state"],
+                substate=session["substate"],
+                context=context,
             )
 
             feedback_message = evaluation.get("feedback_message")
@@ -392,7 +518,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                     suggested_options = current_question.get("suggested_options")
 
                 feedback_message = (
-                    "Давай упростим. Можно выбрать самый близкий вариант или дать примерный ответ."
+                    "Давай упростим. Можно выбрать самый близкий вариант или дать примерный, но полезный для плана ответ."
                 )
                 follow_up_question = (
                     follow_up_question
@@ -422,26 +548,31 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
 
         follow_up_attempts[current_question["key"]] = 0
 
-        next_step = await dynamic_profiling_service.select_next_step(
-            goal_title=goal["title"],
-            goal_description=goal.get("description"),
-            questions=questions,
-            answers=answers,
-            asked_question_keys=asked_question_keys,
-            skipped_question_keys=skipped_question_keys,
-        )
+        try:
+            next_step = await dynamic_profiling_service.select_next_step(
+                goal_title=goal["title"],
+                goal_description=goal.get("description"),
+                questions=questions,
+                answers=answers,
+                asked_question_keys=asked_question_keys,
+                skipped_question_keys=skipped_question_keys,
+            )
+        except Exception:
+            raise HTTPException(status_code=500, detail="profiling_next_step_selection_failed")
+
+        if not isinstance(next_step, dict):
+            raise HTTPException(status_code=500, detail="profiling_next_step_invalid")
 
         has_required_answers = _has_required_answers(answers)
 
-        if next_step["is_completed"] and not has_required_answers:
-            missing_keys = _get_missing_required_keys(answers)
+        if next_step.get("is_completed") and not has_required_answers:
+            forced_question = _pick_forced_required_question(
+                questions=questions,
+                answers=answers,
+                asked_question_keys=asked_question_keys,
+            )
 
-            forced_question = None
-            for missing_key in missing_keys:
-                candidate = _find_question_by_key(questions, missing_key)
-                if candidate:
-                    forced_question = candidate
-                    break
+            missing_keys = _get_missing_required_keys(answers)
 
             if not forced_question:
                 raise HTTPException(
@@ -464,23 +595,12 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
             )
             context["profiling"] = profiling
 
-            connection.execute(
-                text(
-                    """
-                    UPDATE goal_sessions
-                    SET state = :state,
-                        substate = :substate,
-                        context_json = CAST(:context_json AS jsonb),
-                        updated_at = NOW()
-                    WHERE goal_id = :goal_id
-                    """
-                ),
-                {
-                    "goal_id": goal_id,
-                    "state": "awaiting_profiling_answer",
-                    "substate": forced_question["key"],
-                    "context_json": json.dumps(context, ensure_ascii=False),
-                },
+            _apply_profiling_update(
+                connection,
+                goal_id=goal_id,
+                state="awaiting_profiling_answer",
+                substate=forced_question["key"],
+                context=context,
             )
 
             return _build_state_response(
@@ -491,16 +611,64 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 extra={
                     "answer_accepted": True,
                     "needs_follow_up": False,
-                    "feedback_message": "Нужно уточнить ещё несколько важных моментов, чтобы собрать полный план.",
+                    "feedback_message": "Нужно уточнить ещё несколько важных моментов, чтобы собрать сильный и точный план.",
                 },
             )
 
-        if next_step["is_completed"]:
-            summary = await profiling_summary_service.build_summary(
+        if next_step.get("is_completed"):
+            summary = await _build_and_validate_summary(
                 goal_title=goal["title"],
                 goal_description=goal.get("description"),
                 answers=answers,
             )
+
+            if not _is_summary_complete(summary):
+                forced_question = _pick_forced_required_question(
+                    questions=questions,
+                    answers=answers,
+                    asked_question_keys=asked_question_keys,
+                )
+
+                if forced_question:
+                    profiling.update(
+                        {
+                            "answers": answers,
+                            "asked_question_keys": asked_question_keys,
+                            "skipped_question_keys": skipped_question_keys,
+                            "follow_up_attempts": follow_up_attempts,
+                            "current_question_key": forced_question["key"],
+                            "is_completed": False,
+                            "questions_answered_count": len(answers),
+                            "questions_total_count": len(questions),
+                            "summary": None,
+                        }
+                    )
+                    context["profiling"] = profiling
+
+                    _apply_profiling_update(
+                        connection,
+                        goal_id=goal_id,
+                        state="awaiting_profiling_answer",
+                        substate=forced_question["key"],
+                        context=context,
+                    )
+
+                    return _build_state_response(
+                        goal_id=goal_id,
+                        state="awaiting_profiling_answer",
+                        substate=forced_question["key"],
+                        context=context,
+                        extra={
+                            "answer_accepted": True,
+                            "needs_follow_up": False,
+                            "feedback_message": "Почти готово, но для точного плана не хватает ещё одного важного блока.",
+                        },
+                    )
+
+                raise HTTPException(
+                    status_code=500,
+                    detail="profiling_summary_incomplete_and_no_forced_question_available",
+                )
 
             profiling.update(
                 {
@@ -529,23 +697,12 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 {"goal_id": goal_id},
             )
 
-            connection.execute(
-                text(
-                    """
-                    UPDATE goal_sessions
-                    SET state = :state,
-                        substate = :substate,
-                        context_json = CAST(:context_json AS jsonb),
-                        updated_at = NOW()
-                    WHERE goal_id = :goal_id
-                    """
-                ),
-                {
-                    "goal_id": goal_id,
-                    "state": "idle",
-                    "substate": "profiling_completed",
-                    "context_json": json.dumps(context, ensure_ascii=False),
-                },
+            _apply_profiling_update(
+                connection,
+                goal_id=goal_id,
+                state="idle",
+                substate="profiling_completed",
+                context=context,
             )
 
             return _build_state_response(
@@ -580,23 +737,12 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
         )
         context["profiling"] = profiling
 
-        connection.execute(
-            text(
-                """
-                UPDATE goal_sessions
-                SET state = :state,
-                    substate = :substate,
-                    context_json = CAST(:context_json AS jsonb),
-                    updated_at = NOW()
-                WHERE goal_id = :goal_id
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "state": "awaiting_profiling_answer",
-                "substate": next_question["key"],
-                "context_json": json.dumps(context, ensure_ascii=False),
-            },
+        _apply_profiling_update(
+            connection,
+            goal_id=goal_id,
+            state="awaiting_profiling_answer",
+            substate=next_question["key"],
+            context=context,
         )
 
         return _build_state_response(

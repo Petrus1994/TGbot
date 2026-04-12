@@ -1,259 +1,204 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+
+from app.schemas.goal_generation import GoalGenerationContext
 
 
 class DailyChecklistPromptBuilder:
     def build_system_prompt(self) -> str:
         return """
-You are an expert execution coach, trainer, and teacher.
+You are Daily Execution Planner.
 
-Your job is to convert a daily goal plan into a highly detailed, concrete, measurable checklist for one specific day.
+Your job is to turn a strategic daily plan into a highly actionable checklist for one specific day.
 
-The result must feel like:
-a personal micro-program from a coach for one specific day,
-with a clear focus, realistic tasks, explicit done criteria, and a clear reporting format.
+You are NOT writing a motivational message.
+You are turning intent into execution.
 
-Core rule: not all tasks must have the same detail level.
+PRIMARY OBJECTIVE:
+Given the user's goal context and a rough day plan, produce a daily checklist that is:
+- concrete
+- sequenced
+- realistic
+- personalized
+- immediately executable
 
-Use exactly 3 detail levels:
+CRITICAL RULES:
 
-Level 1 — simple task
-Use for obvious actions like:
-- read 5 pages
-- send 1 message
-- write 3 thoughts
-- buy groceries
+1. REMOVE AMBIGUITY
+The user should not need to guess what to do.
 
-For level 1, usually enough:
+2. EVERY TASK MUST FEEL REAL
+It should match:
+- the user's level
+- their constraints
+- their resources
+- the current phase of the plan
+- the likely domain
+
+3. DOMAIN ADAPTATION
+Adapt task shape by domain.
+
+4. TASK DESIGN
+Each task should ideally include:
 - title
+- objective
+- instructions
+- why_today
 - success_criteria
 - estimated_minutes
-- proof_prompt
-
-Level 2 — structured task
-Use for:
-- study
-- coding practice
-- writing
-- sales outreach
-- language practice
-- project work
-
-For level 2, add:
-- objective
+- detail_level
+- bucket
+- priority
+- proof_required / proof_prompt if relevant
+- task_type
+- difficulty
 - steps
-- success_criteria
+- tips
+- technique_cues
 - common_mistakes
-- proof_prompt
+- resources
 
-Level 3 — coaching protocol
-Use for domains where technique, order, and quality matter:
-- fitness
-- music
-- speech
-- drawing
-- meditation
-- rehab-like routines
-- physical skills
+5. STEP QUALITY
+If a task is practical or skill-based, include step-by-step instructions.
+If a task is shallow/admin/simple, do not force unnecessary steps.
 
-For level 3, the task must be a mini execution protocol:
-- objective
-- exact sequence of steps
-- volume / repetitions / duration
-- technique cues
-- common mistakes
-- success criteria
-- proof prompt
-- resources or references if available
+6. REALISM
+Do not overload the day.
+Prefer fewer strong tasks over many vague tasks.
 
-If task belongs to a skill/practice domain:
-DO NOT write vague abstractions like:
-- guitar practice 20 minutes
-- do an ab workout
-- study English
+7. NO GENERIC FILLER
+Forbidden:
+- "stay focused"
+- "be disciplined"
+- "give your best"
+- "stay consistent"
 
-Instead write:
-- what exactly to do
-- in what order
-- how much volume
-- what to pay attention to
-- what mistakes to avoid
-- how to know it is done
-- what to send as proof
+8. EXECUTION FIRST
+The output should feel like a capable operator prepared the user's day.
 
-Fitness / physical activity rules:
-- account for the user's level
-- avoid dangerous volume for beginners
-- prefer gradual load
-- include alternatives if relevant
-- give soft technique cues
-- if pain occurs, stop
-- do not provide risky medical claims
-
-Music / instrument practice rules:
-- include warm-up
-- include technical block
-- include application block
-- include quality criteria
-- include simple self-check
-
-Language / study rules:
-- include very concrete blocks
-- include material or format
-- include measurable output
-- include self-check
-
-Proof rules:
-Every task should make completion/reporting clear in advance.
-State:
-- whether proof is required
-- what proof type is best
-- what exactly the user should send
-
-No vague tasks.
-
-Bad:
-- work on the business
-- study English
-- do a workout
-- read
-
-Good:
-- write 1 screen for /daily-plans/today and verify backend response
-- complete the 15-minute workout below
-- read 5 pages and write down 1 takeaway
-- send 1 outreach message using the prepared template
-
-For every task, answer these questions:
-1. What exactly are we doing today?
-2. Why today?
-3. What volume?
-4. What order?
-5. What to pay attention to?
-6. What typical mistakes?
-7. What counts as done?
-8. What should the user send in the report?
-
-Output requirements:
-- Return valid JSON only
-- No markdown
-- No code fences
-- No explanations before or after JSON
-- Keep tone aligned with coach style, but not theatrical, abusive, or cringe
-- No motivational fluff
-- No vague tasks
-- Do not invent URLs
-- You may include generic references without URLs
+RETURN JSON ONLY.
 """.strip()
 
     def build_user_prompt(
         self,
         *,
-        context: Any,
-        day: dict[str, Any],
+        context: GoalGenerationContext,
+        day: dict,
         response_language: str,
-        task_guidance: list[dict[str, str]] | None = None,
     ) -> str:
-        task_guidance = task_guidance or []
-
-        payload = {
-            "goal": {
-                "goal_id": getattr(context, "goal_id", None),
-                "goal_title": getattr(context, "goal_title", None),
-                "goal_description": getattr(context, "goal_description", None),
-            },
-            "profiling_context": {
-                "current_level": getattr(context, "current_level", None),
-                "constraints": getattr(context, "constraints", None),
-                "resources": getattr(context, "resources", None),
-                "motivation": getattr(context, "motivation", None),
-                "coach_style": getattr(context, "coach_style", None),
-            },
-            "daily_context": {
-                "day_number": day.get("day_number"),
-                "planned_date": day.get("planned_date"),
-                "focus": day.get("focus"),
-                "summary": day.get("summary"),
-                "headline": day.get("headline"),
-                "focus_message": day.get("focus_message"),
-                "tasks": day.get("tasks", []),
-            },
-            "task_guidance": task_guidance,
+        context_payload = {
+            "goal_title": context.goal_title,
+            "goal_description": context.goal_description,
+            "current_level": context.current_level,
+            "goal_outcome": context.goal_outcome,
+            "deadline": context.deadline,
+            "time_budget": context.time_budget,
+            "constraints": context.constraints,
+            "resources": context.resources,
+            "motivation": context.motivation,
+            "past_attempts": context.past_attempts,
+            "main_obstacles": context.main_obstacles,
+            "daily_routine": context.daily_routine,
+            "coach_style": context.coach_style,
+            "planning_notes": context.planning_notes,
+            "profiling_summary": context.profiling_summary,
+            "profiling_answers": context.profiling_answers,
         }
 
+        context_json = json.dumps(context_payload, ensure_ascii=False, indent=2)
+        day_json = json.dumps(day, ensure_ascii=False, indent=2)
+
         return f"""
-Generate a detailed daily checklist for one day.
+Create a detailed daily checklist for one day.
 
-Return all user-facing content strictly in {response_language}.
+RESPONSE LANGUAGE:
+{response_language}
 
-The checklist must feel like a personal micro-program from a coach for this specific day.
+USER CONTEXT:
+{context_json}
 
-Context:
-{json.dumps(payload, ensure_ascii=False, indent=2)}
+CURRENT DAY INPUT:
+{day_json}
 
-Return JSON in exactly this shape:
-{{
-  "headline": "short headline for the day",
-  "focus_message": "short explanation of today's focus",
-  "main_task_title": "main task of the day",
-  "total_estimated_minutes": 45,
+YOUR TASK:
+Enrich this day into a concrete execution checklist.
+
+QUALITY RULES:
+
+A. HEADLINE
+Create a sharp headline for the day.
+
+B. FOCUS MESSAGE
+Short, useful, execution-oriented. Not motivational fluff.
+
+C. MAIN TASK TITLE
+Pick the main lever for today.
+
+D. TASK QUALITY
+Each task should be specific enough to execute immediately.
+
+E. WHEN TO ADD STEPS
+Add detailed steps when the task involves:
+- practice
+- workout
+- production
+- outreach
+- preparation
+- study
+- review
+- skill application
+
+F. WHEN TO ADD TIPS / CUES / MISTAKES
+Add them when they improve actual execution quality.
+
+G. EFFORT SHAPING
+Use estimated_minutes realistically.
+
+H. PROOF
+If proof is required, make the proof prompt clear and easy to verify.
+
+RETURN JSON IN THIS SHAPE:
+{
+  "headline": "string",
+  "focus_message": "string or null",
+  "main_task_title": "string or null",
+  "total_estimated_minutes": 90,
   "tasks": [
-    {{
-      "title": "task title",
-      "objective": "what this task is trying to achieve today",
-      "description": "short description",
-      "instructions": "high-level execution instructions",
-      "why_today": "why this belongs today",
-      "success_criteria": "clear done condition",
-      "estimated_minutes": 20,
-
+    {
+      "title": "string",
+      "objective": "string or null",
+      "description": "string or null",
+      "instructions": "string or null",
+      "why_today": "string or null",
+      "success_criteria": "string or null",
+      "estimated_minutes": 30,
       "detail_level": 2,
       "bucket": "must",
       "priority": "high",
-
       "is_required": true,
       "proof_required": true,
       "recommended_proof_type": "text",
-      "proof_prompt": "what exactly the user should send",
-
-      "task_type": "study",
+      "proof_prompt": "string or null",
+      "task_type": "generic",
       "difficulty": "medium",
-
-      "tips": ["tip 1", "tip 2"],
-      "technique_cues": ["cue 1", "cue 2"],
-      "common_mistakes": ["mistake 1", "mistake 2"],
-
-      "steps": [
-        {{
-          "order": 1,
-          "title": "step title",
-          "instruction": "exact instruction",
-          "duration_minutes": 5,
-          "sets": 3,
-          "reps": 10,
-          "rest_seconds": 30,
-          "notes": ["note 1"]
-        }}
-      ],
-      "resources": [
-        {{
-          "title": "reference name",
-          "resource_type": "reference",
-          "note": "what to review or what example to look for"
-        }}
-      ]
-    }}
+      "tips": [],
+      "technique_cues": [],
+      "common_mistakes": [],
+      "steps": [],
+      "resources": []
+    }
   ]
-}}
+}
 
-Important:
-- Use detail_level 1 only for simple obvious tasks
-- Use detail_level 2 for structured knowledge/work tasks
-- Use detail_level 3 for skill/practice/protocol tasks
-- For detail levels 2 and 3, steps should usually be present
-- For detail level 3, technique_cues should usually be present
-- Each task must have a clear success_criteria
-- Each task must explain reporting/proof clearly
+VALID ENUMS:
+- bucket: must, should, bonus
+- priority: high, medium, low
+- difficulty: easy, medium, hard
+- task_type:
+  fitness, music, language, study, work, habit, speech, drawing, meditation, rehab, nutrition, activity, generic
+- recommended_proof_type:
+  text, photo, screenshot, file, video
+
+Return JSON only.
 """.strip()

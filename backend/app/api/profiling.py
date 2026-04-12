@@ -31,24 +31,15 @@ ai_profiling_service = AIProfilingService()
     summary="Start profiling flow for a goal",
 )
 async def start_profiling_endpoint(goal_id: str):
-    """
-    Инициализирует profiling flow.
-
-    Возвращает:
-    - первый вопрос
-    - тип вопроса
-    - suggested options, если они есть
-    - пример ответа, если он релевантен
-    """
     try:
         return await start_profiling(goal_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"profiling_start_failed: {str(e)}",
-        ) from e
+            detail="profiling_start_failed",
+        )
 
 
 @router.get(
@@ -58,27 +49,15 @@ async def start_profiling_endpoint(goal_id: str):
     summary="Get current profiling question",
 )
 def get_current_question_endpoint(goal_id: str):
-    """
-    Возвращает текущий активный вопрос profiling.
-
-    Может включать:
-    - current_question_key
-    - current_question_text
-    - example_answer
-    - question_type
-    - suggested_options
-    - allow_free_text
-    - follow_up_attempts
-    """
     try:
         return get_current_question(goal_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"get_current_question_failed: {str(e)}",
-        ) from e
+            detail="get_current_question_failed",
+        )
 
 
 @router.post(
@@ -87,37 +66,25 @@ def get_current_question_endpoint(goal_id: str):
     status_code=status.HTTP_200_OK,
     summary="Submit answer for current profiling question",
 )
-async def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswerRequest):
-    """
-    Принимает ответ пользователя на текущий вопрос profiling.
+async def submit_profiling_answer_endpoint(
+    goal_id: str,
+    payload: ProfilingAnswerRequest,
+):
+    if not payload.answer or not payload.answer.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="empty_answer",
+        )
 
-    Поведение:
-    - если ответ слабый -> needs_follow_up = true
-    - если ответ хороший -> переход к следующему вопросу
-    - если собраны обязательные поля -> profiling завершается
-    - при завершении возвращается profiling_summary
-
-    Фронт должен учитывать:
-    - answer_accepted
-    - needs_follow_up
-    - feedback_message
-    - follow_up_question
-    - example_answer
-    - question_type
-    - suggested_options
-    - allow_free_text
-    - follow_up_attempts
-    - profiling_summary
-    """
     try:
         return await submit_profiling_answer(goal_id, payload.answer)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"submit_profiling_answer_failed: {str(e)}",
-        ) from e
+            detail="submit_profiling_answer_failed",
+        )
 
 
 @router.get(
@@ -127,43 +94,28 @@ async def submit_profiling_answer_endpoint(goal_id: str, payload: ProfilingAnswe
     summary="Get current profiling state",
 )
 def get_profiling_state_endpoint(goal_id: str):
-    """
-    Возвращает текущее состояние profiling.
-
-    Используется фронтом, чтобы понять:
-    - profiling завершён или нет
-    - какой сейчас вопрос
-    - нужен ли follow-up
-    - есть ли suggested options
-    - сколько уже было follow-up попыток
-    - готов ли profiling_summary
-    """
     try:
         return get_profiling_state(goal_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"get_profiling_state_failed: {str(e)}",
-        ) from e
+            detail="get_profiling_state_failed",
+        )
 
 
 @router.post(
     "/ai-questions",
     status_code=status.HTTP_200_OK,
-    summary="Generate AI profiling questions for debugging",
+    summary="Generate AI profiling questions (debug)",
 )
 async def generate_ai_profiling_questions(goal_id: str):
     """
-    Вспомогательный debug endpoint для генерации profiling questions через AI.
-
-    Основной flow profiling:
-    - /start
-    - /current-question
-    - /answer
-    - /state
+    Debug endpoint.
+    Не используется в основном flow.
     """
+
     with engine.begin() as connection:
         goal = connection.execute(
             text(
@@ -184,16 +136,19 @@ async def generate_ai_profiling_questions(goal_id: str):
 
     try:
         result = await ai_profiling_service.generate_questions(goal["title"])
+
         return {
             "goal_id": goal_id,
             "goal_title": goal["title"],
             "goal_description": goal.get("description"),
-            "questions": result,
+            "questions": result.get("questions", []),
+            "coach_message": result.get("coach_message"),
         }
+
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"ai_profiling_failed: {str(e)}",
-        ) from e
+            detail="ai_profiling_failed",
+        )

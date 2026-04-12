@@ -89,6 +89,24 @@ class PlanGenerationService:
         "вс": 7,
     }
 
+    FORBIDDEN_PHRASES = [
+        "постарайся",
+        "думай",
+        "верь в себя",
+        "не сдавайся",
+        "будь мотивирован",
+        "eat healthy",
+        "practice more",
+        "stay consistent",
+        "try your best",
+        "stay motivated",
+        "believe in yourself",
+        "don't give up",
+        "think positively",
+        "just keep going",
+        "keep pushing",
+    ]
+
     def __init__(self) -> None:
         self.prompt_builder = PlanPromptBuilder()
         self.llm_client = OpenAIClient(
@@ -158,8 +176,7 @@ Do not mix languages.
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            ai_response = self._parse_and_validate_ai_response(raw_response)
-            return ai_response
+            return self._parse_and_validate_ai_response(raw_response)
         except Exception as e:
             first_error = e
 
@@ -173,8 +190,7 @@ Do not mix languages.
                 system_prompt=system_prompt,
                 user_prompt=retry_user_prompt,
             )
-            ai_response = self._parse_and_validate_ai_response(raw_response)
-            return ai_response
+            return self._parse_and_validate_ai_response(raw_response)
         except Exception as retry_error:
             raise AIPlanGenerationError(
                 f"ai_generation_failed_after_retry | first_error={first_error} | retry_error={retry_error}"
@@ -213,13 +229,10 @@ Do not mix languages.
             if not isinstance(item, dict):
                 continue
 
-            title = self._safe_text(item.get("title"))
-            description = self._safe_text(item.get("description"))
-
-            if not title:
-                title = "Untitled step"
-            if not description:
-                description = "Complete the next concrete milestone for this goal."
+            title = self._safe_text(item.get("title")) or "Untitled step"
+            description = self._safe_text(item.get("description")) or (
+                "Complete the next meaningful phase for this goal."
+            )
 
             normalized_steps.append(
                 {
@@ -253,7 +266,10 @@ Do not mix languages.
             )
 
             proof_type = self._normalize_proof_type(item.get("proof_type"))
-            proof_required = self._normalize_bool(item.get("proof_required"), default=True)
+            proof_required = self._normalize_bool(
+                item.get("proof_required"),
+                default=True,
+            )
 
             normalized_tasks.append(
                 {
@@ -318,9 +334,18 @@ Do not mix languages.
             normalized_days = self._normalize_days_of_week(raw_days)
 
             if not normalized_days:
-                fallback_days = config.get("times_per_week") or raw_task.get("times_per_week")
+                fallback_days = (
+                    config.get("times_per_week")
+                    or raw_task.get("times_per_week")
+                )
                 if fallback_days:
-                    count = max(1, min(self._normalize_positive_int(fallback_days, default=3), 7))
+                    count = max(
+                        1,
+                        min(
+                            self._normalize_positive_int(fallback_days, default=3),
+                            7,
+                        ),
+                    )
                     normalized_days = sorted(self._weekly_slots(count))
                 else:
                     normalized_days = [1, 3, 5]
@@ -346,14 +371,10 @@ Do not mix languages.
             if day_int is not None:
                 normalized.append(day_int)
 
-        deduplicated = sorted(set(day for day in normalized if 1 <= day <= 7))
-        return deduplicated
+        return sorted(set(day for day in normalized if 1 <= day <= 7))
 
     def _normalize_single_weekday(self, value: Any) -> int | None:
-        if value is None:
-            return None
-
-        if isinstance(value, bool):
+        if value is None or isinstance(value, bool):
             return None
 
         if isinstance(value, int):
@@ -400,10 +421,7 @@ Do not mix languages.
         return max(1, normalized)
 
     def _normalize_positive_int(self, raw_value: Any, default: int) -> int:
-        if raw_value is None:
-            return default
-
-        if isinstance(raw_value, bool):
+        if raw_value is None or isinstance(raw_value, bool):
             return default
 
         if isinstance(raw_value, int):
@@ -446,7 +464,7 @@ Do not mix languages.
             goal = connection.execute(
                 text(
                     """
-                    SELECT id, user_id, title, description, status
+                    SELECT id, user_id, title, description, target_date, status
                     FROM goals
                     WHERE id = :goal_id
                     """
@@ -515,6 +533,62 @@ Do not mix languages.
                 self._pick_first_non_empty(
                     profiling_summary.get("coach_style"),
                     answers.get("coach_style"),
+                    profiling_summary.get("preferred_execution_style"),
+                    answers.get("preferred_execution_style"),
+                )
+            )
+
+            goal_outcome = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("goal_outcome"),
+                    profiling_summary.get("success_metrics"),
+                    answers.get("goal_outcome"),
+                )
+            )
+            deadline = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("deadline"),
+                    answers.get("deadline"),
+                    goal.get("target_date"),
+                )
+            )
+            time_budget = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("time_budget"),
+                    answers.get("time_budget"),
+                )
+            )
+            past_attempts = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("past_attempts"),
+                    answers.get("past_attempts"),
+                )
+            )
+            main_obstacles = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("main_obstacles"),
+                    profiling_summary.get("risk_factors"),
+                    answers.get("main_obstacles"),
+                    answers.get("obstacles"),
+                )
+            )
+            daily_routine = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("daily_routine"),
+                    answers.get("daily_routine"),
+                )
+            )
+            planning_notes = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("planning_notes"),
+                    profiling_summary.get("environment"),
+                    answers.get("planning_notes"),
+                    answers.get("environment"),
+                )
+            )
+            plan_confidence = self._normalize_text_field(
+                self._pick_first_non_empty(
+                    profiling_summary.get("plan_confidence"),
                 )
             )
 
@@ -528,6 +602,16 @@ Do not mix languages.
                 resources=resources,
                 motivation=motivation,
                 coach_style=coach_style,
+                goal_outcome=goal_outcome,
+                deadline=deadline,
+                time_budget=time_budget,
+                past_attempts=past_attempts,
+                main_obstacles=main_obstacles,
+                daily_routine=daily_routine,
+                planning_notes=planning_notes,
+                plan_confidence=plan_confidence,
+                profiling_summary=profiling_summary,
+                profiling_answers=answers,
             )
 
     def _validate_context(self, context: GoalGenerationContext) -> None:
@@ -564,19 +648,6 @@ Do not mix languages.
         if ai_response.duration_weeks < 1:
             raise AIResponseValidationError("ai_duration_weeks_invalid")
 
-        forbidden_phrases = [
-            "постарайся",
-            "думай",
-            "верь в себя",
-            "не сдавайся",
-            "будь мотивирован",
-            "try your best",
-            "stay motivated",
-            "believe in yourself",
-            "don't give up",
-            "think positively",
-        ]
-
         if not ai_response.summary.strip():
             raise AIResponseValidationError("ai_summary_empty")
 
@@ -587,7 +658,7 @@ Do not mix languages.
                 raise AIResponseValidationError("ai_step_description_empty")
 
             text_to_check = f"{step.title} {step.description}".lower()
-            for phrase in forbidden_phrases:
+            for phrase in self.FORBIDDEN_PHRASES:
                 if phrase in text_to_check:
                     raise AIResponseValidationError(
                         f"ai_response_contains_forbidden_phrase: {phrase}"
@@ -599,6 +670,13 @@ Do not mix languages.
             if not task.description.strip():
                 raise AIResponseValidationError("ai_task_description_empty")
 
+            text_to_check = f"{task.title} {task.description}".lower()
+            for phrase in self.FORBIDDEN_PHRASES:
+                if phrase in text_to_check:
+                    raise AIResponseValidationError(
+                        f"ai_task_contains_forbidden_phrase: {phrase}"
+                    )
+
             if task.cadence_type not in self.ALLOWED_CADENCE_TYPES:
                 raise AIResponseValidationError(
                     f"ai_task_invalid_cadence_type: {task.cadence_type}"
@@ -609,16 +687,17 @@ Do not mix languages.
                     f"ai_task_invalid_proof_type: {task.proof_type}"
                 )
 
-            if task.cadence_type == "daily":
-                if task.cadence_config != {}:
-                    raise AIResponseValidationError(
-                        "ai_task_daily_cadence_config_must_be_empty"
-                    )
+            if task.cadence_type == "daily" and task.cadence_config != {}:
+                raise AIResponseValidationError(
+                    "ai_task_daily_cadence_config_must_be_empty"
+                )
 
             if task.cadence_type == "weekly":
                 times_per_week = task.cadence_config.get("times_per_week")
                 if not isinstance(times_per_week, int) or times_per_week < 1:
-                    raise AIResponseValidationError("ai_task_weekly_times_per_week_invalid")
+                    raise AIResponseValidationError(
+                        "ai_task_weekly_times_per_week_invalid"
+                    )
 
             if task.cadence_type == "specific_weekdays":
                 days_of_week = task.cadence_config.get("days_of_week")
@@ -632,7 +711,7 @@ Do not mix languages.
         *,
         goal_id: str,
         ai_response: AIPlanResponseV2,
-    ) -> dict:
+    ) -> dict[str, Any]:
         recurring_tasks = [
             {
                 "task_id": f"{goal_id}-task-{index}",
@@ -648,7 +727,6 @@ Do not mix languages.
         ]
 
         days = self._build_daily_days(ai_response=ai_response)
-        print(f"🔥 GENERATED BASE DAYS COUNT: {len(days)}")
 
         content = {
             "duration_weeks": ai_response.duration_weeks,
@@ -673,13 +751,13 @@ Do not mix languages.
             "status": "draft",
         }
 
-    def _build_daily_days(self, ai_response: AIPlanResponseV2) -> list[dict]:
+    def _build_daily_days(self, ai_response: AIPlanResponseV2) -> list[dict[str, Any]]:
         total_days = max(7, ai_response.duration_weeks * 7)
         start_date = date.today()
         steps = ai_response.steps
         tasks = ai_response.tasks
 
-        days: list[dict] = []
+        days: list[dict[str, Any]] = []
 
         for day_number in range(1, total_days + 1):
             planned_date = start_date + timedelta(days=day_number - 1)
@@ -690,7 +768,7 @@ Do not mix languages.
                 total_days=total_days,
             )
 
-            day_tasks: list[dict] = []
+            day_tasks: list[dict[str, Any]] = []
             for task in tasks:
                 if self._task_is_scheduled_for_day(
                     task=task,
@@ -724,13 +802,13 @@ Do not mix languages.
                     )
 
             if not day_tasks and tasks:
-                first_task = tasks[0]
+                fallback_task = tasks[0]
                 day_tasks.append(
                     {
-                        "title": first_task.title,
-                        "description": first_task.description,
+                        "title": fallback_task.title,
+                        "description": fallback_task.description,
                         "objective": None,
-                        "instructions": first_task.description,
+                        "instructions": fallback_task.description,
                         "why_today": None,
                         "success_criteria": None,
                         "estimated_minutes": None,
@@ -738,8 +816,8 @@ Do not mix languages.
                         "bucket": "must",
                         "priority": "medium",
                         "is_required": True,
-                        "proof_required": first_task.proof_required,
-                        "recommended_proof_type": first_task.proof_type,
+                        "proof_required": fallback_task.proof_required,
+                        "recommended_proof_type": fallback_task.proof_type,
                         "proof_prompt": None,
                         "task_type": None,
                         "difficulty": None,
@@ -758,7 +836,7 @@ Do not mix languages.
                     "summary": step.description,
                     "headline": None,
                     "focus_message": None,
-                    "main_task_title": None,
+                    "main_task_title": day_tasks[0]["title"] if day_tasks else None,
                     "total_estimated_minutes": None,
                     "planned_date": planned_date.isoformat(),
                     "tasks": day_tasks,
@@ -813,6 +891,10 @@ Do not mix languages.
             context.resources,
             context.motivation,
             context.coach_style,
+            context.goal_outcome,
+            context.time_budget,
+            context.main_obstacles,
+            context.daily_routine,
         ]
         combined = " ".join(part for part in text_parts if part)
 
@@ -838,6 +920,7 @@ Strict requirements:
 - duration_weeks must be >= 1
 - Steps must be concrete and actionable
 - Tasks must be realistic and repeatable
+- Tasks must not be generic
 - Do not use motivational fluff
 - All user-facing content must be strictly in {response_language}
 - Do not mix languages
@@ -859,6 +942,9 @@ Strict requirements:
   - believe in yourself
   - don't give up
   - think positively
+  - stay consistent
+  - eat healthy
+  - practice more
   - постарайся
   - думай
   - не сдавайся

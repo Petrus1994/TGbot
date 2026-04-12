@@ -1,350 +1,267 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Any
 
 from app.config import settings
+from app.core.exceptions import AIPlanGenerationError, AIResponseValidationError
 from app.schemas.ai_daily_checklist import AIDailyChecklistResponse
+from app.schemas.goal_generation import GoalGenerationContext
 from app.services.daily_checklist_prompt_builder import DailyChecklistPromptBuilder
-from app.services.daily_task_template_service import DailyTaskTemplateService
 from app.services.openai_client import OpenAIClient
 
 
 class DailyTaskDetailingService:
+    ALLOWED_BUCKETS = {"must", "should", "bonus"}
+    ALLOWED_PRIORITIES = {"high", "medium", "low"}
+    ALLOWED_DIFFICULTIES = {"easy", "medium", "hard"}
+    ALLOWED_TASK_TYPES = {
+        "fitness",
+        "music",
+        "language",
+        "study",
+        "work",
+        "habit",
+        "speech",
+        "drawing",
+        "meditation",
+        "rehab",
+        "nutrition",
+        "activity",
+        "generic",
+    }
+    ALLOWED_PROOF_TYPES = {"text", "photo", "screenshot", "file", "video"}
+    ALLOWED_RESOURCE_TYPES = {"video", "article", "reference", "checklist", "tool"}
+
     def __init__(self) -> None:
         self.prompt_builder = DailyChecklistPromptBuilder()
-        self.template_service = DailyTaskTemplateService()
         self.llm_client = OpenAIClient(
             api_key=settings.openai_api_key,
             model=settings.openai_model,
         )
 
-    async def enrich_days(
-        self,
-        *,
-        context: Any,
-        days: list[dict[str, Any]],
-        response_language: str,
-    ) -> list[dict[str, Any]]:
-        enriched_days: list[dict[str, Any]] = []
-
-        for day in days:
-            enriched_day = await self.enrich_single_day(
-                context=context,
-                day=day,
-                response_language=response_language,
-            )
-            enriched_days.append(enriched_day)
-
-        return enriched_days
-
     async def enrich_single_day(
         self,
         *,
-        context: Any,
+        context: GoalGenerationContext,
         day: dict[str, Any],
         response_language: str,
     ) -> dict[str, Any]:
-        raw_tasks = day.get("tasks", [])
-        task_guidance = self._build_task_guidance(raw_tasks)
-
         system_prompt = self.prompt_builder.build_system_prompt()
         user_prompt = self.prompt_builder.build_user_prompt(
             context=context,
             day=day,
             response_language=response_language,
-            task_guidance=task_guidance,
         )
+
+        ai_response = await self._generate_with_retry(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_language=response_language,
+            original_day=day,
+        )
+
+        return self._map_response_to_day_payload(
+            original_day=day,
+            ai_response=ai_response,
+        )
+
+    async def _generate_with_retry(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        response_language: str,
+        original_day: dict[str, Any],
+    ) -> AIDailyChecklistResponse:
+        first_error: Exception | None = None
 
         try:
             raw_response = await self.llm_client.generate_plan(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            normalized_response = self._normalize_ai_daily_checklist_payload(raw_response)
-            parsed = AIDailyChecklistResponse.model_validate(normalized_response)
-            self._validate_ai_daily_checklist(
-                ai_response=parsed,
-                raw_tasks_count=len(raw_tasks),
+            parsed = self._parse_and_validate_ai_response(
+                raw_response=raw_response,
+                original_day=original_day,
             )
-            return self._merge_day_with_ai_response(
-                day=day,
-                ai_response=parsed,
-            )
+            return parsed
         except Exception as e:
-            print(
-                f"⚠️ DAILY CHECKLIST ENRICH FAILED: "
-                f"day={day.get('day_number')} error={e}"
+            first_error = e
+
+        retry_user_prompt = self._build_retry_user_prompt(
+            original_user_prompt=user_prompt,
+            response_language=response_language,
+            original_day=original_day,
+        )
+
+        try:
+            raw_response = await self.llm_client.generate_plan(
+                system_prompt=system_prompt,
+                user_prompt=retry_user_prompt,
             )
-            return self._fallback_enrich_day(day=day)
-
-    def _build_task_guidance(self, tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
-        guidance: list[dict[str, str]] = []
-
-        for task in tasks:
-            title = str(task.get("title") or "")
-            description = str(task.get("description") or "")
-            task_type = self.template_service.infer_task_type(
-                title=title,
-                description=description,
+            parsed = self._parse_and_validate_ai_response(
+                raw_response=raw_response,
+                original_day=original_day,
             )
-            rule = self.template_service.build_task_guidance(task_type)
+            return parsed
+        except Exception as retry_error:
+            raise AIPlanGenerationError(
+                f"daily_detailing_failed_after_retry | first_error={first_error} | retry_error={retry_error}"
+            ) from retry_error
 
-            guidance.append(
-                {
-                    "title": title,
-                    "inferred_task_type": task_type,
-                    "guidance": rule,
-                }
-            )
-
-        return guidance
-
-    def _validate_ai_daily_checklist(
+    def _parse_and_validate_ai_response(
         self,
         *,
-        ai_response: AIDailyChecklistResponse,
-        raw_tasks_count: int,
-    ) -> None:
-        if not ai_response.headline.strip():
-            raise ValueError("daily checklist headline is empty")
+        raw_response: Any,
+        original_day: dict[str, Any],
+    ) -> AIDailyChecklistResponse:
+        normalized_payload = self._normalize_ai_response_payload(
+            raw_response=raw_response,
+            original_day=original_day,
+        )
+        ai_response = AIDailyChecklistResponse.model_validate(normalized_payload)
+        self._validate_ai_response(ai_response, original_day=original_day)
+        return ai_response
 
-        if raw_tasks_count > 0 and len(ai_response.tasks) == 0:
-            raise ValueError("daily checklist returned zero tasks")
-
-        if ai_response.total_estimated_minutes is not None and ai_response.total_estimated_minutes < 1:
-            raise ValueError("total_estimated_minutes must be >= 1")
-
-        forbidden_phrases = [
-            "постарайся",
-            "не сдавайся",
-            "верь в себя",
-            "stay motivated",
-            "believe in yourself",
-            "try your best",
-            "don't give up",
-        ]
-
-        allowed_buckets = {"must", "should", "bonus"}
-        allowed_priorities = {"high", "medium", "low"}
-
-        for task in ai_response.tasks:
-            blob = " ".join(
-                [
-                    task.title or "",
-                    task.description or "",
-                    task.objective or "",
-                    task.instructions or "",
-                    task.why_today or "",
-                    task.success_criteria or "",
-                    " ".join(task.tips),
-                    " ".join(task.technique_cues),
-                    " ".join(task.common_mistakes),
-                ]
-            ).lower()
-
-            for phrase in forbidden_phrases:
-                if phrase in blob:
-                    raise ValueError(f"forbidden phrase in daily checklist: {phrase}")
-
-            if not task.title.strip():
-                raise ValueError("task title is empty")
-
-            if task.estimated_minutes is not None and task.estimated_minutes < 1:
-                raise ValueError("estimated_minutes must be >= 1")
-
-            if task.bucket not in allowed_buckets:
-                raise ValueError(f"invalid task bucket: {task.bucket}")
-
-            if task.priority not in allowed_priorities:
-                raise ValueError(f"invalid task priority: {task.priority}")
-
-            if task.detail_level not in {1, 2, 3}:
-                raise ValueError(f"invalid detail_level: {task.detail_level}")
-
-            if not task.success_criteria or not task.success_criteria.strip():
-                raise ValueError("task success_criteria is required")
-
-            if not task.why_today or not task.why_today.strip():
-                raise ValueError("task why_today is required")
-
-            if task.proof_required:
-                if not task.recommended_proof_type:
-                    raise ValueError("proof_required task must have recommended_proof_type")
-                if not task.proof_prompt or not task.proof_prompt.strip():
-                    raise ValueError("proof_required task must have proof_prompt")
-
-            if task.detail_level == 1:
-                if task.task_type in {"fitness", "music", "speech", "drawing", "meditation", "rehab"}:
-                    raise ValueError(
-                        f"{task.task_type} task cannot use detail_level 1"
-                    )
-
-            if task.detail_level == 2:
-                if not task.steps:
-                    raise ValueError("detail_level 2 task must contain steps")
-
-            if task.detail_level == 3:
-                if not task.steps:
-                    raise ValueError("detail_level 3 task must contain steps")
-                if task.task_type in {
-                    "fitness",
-                    "music",
-                    "speech",
-                    "drawing",
-                    "meditation",
-                    "rehab",
-                } and not task.technique_cues:
-                    raise ValueError(
-                        f"{task.task_type} detail_level 3 task should contain technique_cues"
-                    )
-
-            if task.task_type in {"fitness", "music", "language", "study"} and not task.steps:
-                raise ValueError(f"{task.task_type} task must contain steps")
-
-        if ai_response.tasks:
-            calculated_total = sum(
-                task.estimated_minutes or 0 for task in ai_response.tasks
-            )
-            if (
-                ai_response.total_estimated_minutes is not None
-                and calculated_total > 0
-                and abs(ai_response.total_estimated_minutes - calculated_total) > 20
-            ):
-                raise ValueError(
-                    "total_estimated_minutes differs too much from sum of task durations"
-                )
-
-    def _merge_day_with_ai_response(
+    def _normalize_ai_response_payload(
         self,
         *,
-        day: dict[str, Any],
-        ai_response: AIDailyChecklistResponse,
+        raw_response: Any,
+        original_day: dict[str, Any],
     ) -> dict[str, Any]:
-        merged = deepcopy(day)
-        merged["headline"] = ai_response.headline
-        merged["focus_message"] = ai_response.focus_message
-        merged["main_task_title"] = ai_response.main_task_title
-        merged["total_estimated_minutes"] = ai_response.total_estimated_minutes
-        merged["tasks"] = [
-            self._map_ai_task_to_generated_task(task)
-            for task in ai_response.tasks
-        ]
-        return merged
+        if hasattr(raw_response, "model_dump"):
+            payload = raw_response.model_dump()
+        elif isinstance(raw_response, dict):
+            payload = dict(raw_response)
+        else:
+            raise AIResponseValidationError("daily_ai_response_not_a_dict")
 
-    def _map_ai_task_to_generated_task(self, task) -> dict[str, Any]:
-        return {
-            "title": task.title,
-            "objective": task.objective,
-            "description": task.description,
-            "instructions": task.instructions,
-            "why_today": task.why_today,
-            "success_criteria": task.success_criteria,
-            "estimated_minutes": task.estimated_minutes,
-            "detail_level": task.detail_level,
-            "bucket": task.bucket,
-            "priority": task.priority,
-            "is_required": task.is_required,
-            "proof_required": task.proof_required,
-            "recommended_proof_type": task.recommended_proof_type,
-            "proof_prompt": task.proof_prompt,
-            "task_type": task.task_type,
-            "difficulty": task.difficulty,
-            "tips": task.tips,
-            "technique_cues": task.technique_cues,
-            "common_mistakes": task.common_mistakes,
-            "steps": [
-                {
-                    "order": step.order,
-                    "title": step.title,
-                    "instruction": step.instruction,
-                    "duration_minutes": step.duration_minutes,
-                    "sets": step.sets,
-                    "reps": step.reps,
-                    "rest_seconds": step.rest_seconds,
-                    "notes": step.notes,
-                }
-                for step in task.steps
-            ],
-            "resources": [
-                {
-                    "title": resource.title,
-                    "resource_type": resource.resource_type,
-                    "note": resource.note,
-                }
-                for resource in task.resources
-            ],
-        }
-
-    def _fallback_enrich_day(self, *, day: dict[str, Any]) -> dict[str, Any]:
-        fallback_day = deepcopy(day)
-
-        fallback_day["headline"] = (
-            fallback_day.get("headline")
-            or fallback_day.get("focus")
-            or "Plan for today"
-        )
-        fallback_day["focus_message"] = (
-            fallback_day.get("focus_message")
-            or fallback_day.get("summary")
+        payload["headline"] = self._safe_text(payload.get("headline")) or self._safe_text(
+            original_day.get("focus")
+        ) or "Execution plan"
+        payload["focus_message"] = self._safe_text(payload.get("focus_message"))
+        payload["main_task_title"] = self._safe_text(payload.get("main_task_title"))
+        payload["total_estimated_minutes"] = self._normalize_positive_int_or_none(
+            payload.get("total_estimated_minutes")
         )
 
-        enriched_tasks: list[dict[str, Any]] = []
+        payload["tasks"] = self._normalize_tasks(
+            raw_tasks=payload.get("tasks"),
+            original_day=original_day,
+        )
 
-        for index, task in enumerate(fallback_day.get("tasks", []), start=1):
-            title = str(task.get("title") or f"Task {index}")
-            description = task.get("description")
-            instructions = task.get("instructions") or description or f"Complete the task: {title}"
-            estimated_minutes = task.get("estimated_minutes") or 20
-            proof_required = bool(task.get("proof_required", False))
-            is_required = bool(task.get("is_required", True))
-
-            task_type = self.template_service.infer_task_type(
-                title=title,
-                description=str(description or ""),
+        if payload["total_estimated_minutes"] is None:
+            computed_total = sum(
+                task.get("estimated_minutes") or 0 for task in payload["tasks"]
             )
+            payload["total_estimated_minutes"] = computed_total or None
 
-            detail_level = self._infer_fallback_detail_level(task_type=task_type)
-            bucket = "must" if is_required else "should"
-            priority = "high" if is_required else "medium"
-            why_today = (
-                fallback_day.get("focus_message")
-                or fallback_day.get("summary")
-                or f"This task supports today's focus: {fallback_day.get('focus') or 'execution'}."
-            )
+        return payload
 
-            recommended_proof_type = (
-                self._default_proof_type_for_task_type(task_type)
-                if proof_required
-                else None
+    def _normalize_tasks(
+        self,
+        *,
+        raw_tasks: Any,
+        original_day: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        original_tasks = original_day.get("tasks", [])
+        source_tasks = raw_tasks if isinstance(raw_tasks, list) else []
+
+        normalized_tasks: list[dict[str, Any]] = []
+
+        if not source_tasks and isinstance(original_tasks, list):
+            source_tasks = original_tasks
+
+        for index, item in enumerate(source_tasks, start=1):
+            if not isinstance(item, dict):
+                continue
+
+            original_task = (
+                original_tasks[index - 1]
+                if isinstance(original_tasks, list) and len(original_tasks) >= index
+                else {}
             )
-            proof_prompt = (
-                self._default_proof_prompt(
-                    task_type=task_type,
-                    proof_type=recommended_proof_type,
-                    title=title,
+            if not isinstance(original_task, dict):
+                original_task = {}
+
+            title = self._safe_text(item.get("title")) or self._safe_text(
+                original_task.get("title")
+            ) or f"Task {index}"
+
+            description = self._safe_text(item.get("description")) or self._safe_text(
+                original_task.get("description")
+            ) or self._safe_text(item.get("instructions")) or "Complete the assigned task."
+
+            instructions = self._safe_text(item.get("instructions")) or self._safe_text(
+                original_task.get("instructions")
+            ) or description
+
+            objective = self._safe_text(item.get("objective")) or self._safe_text(
+                original_task.get("objective")
+            )
+            why_today = self._safe_text(item.get("why_today")) or self._safe_text(
+                original_task.get("why_today")
+            )
+            success_criteria = self._safe_text(
+                item.get("success_criteria")
+            ) or self._safe_text(original_task.get("success_criteria"))
+
+            estimated_minutes = self._normalize_positive_int_or_none(
+                item.get("estimated_minutes")
+            )
+            if estimated_minutes is None:
+                estimated_minutes = self._normalize_positive_int_or_none(
+                    original_task.get("estimated_minutes")
                 )
-                if proof_required
-                else None
+
+            detail_level = self._normalize_detail_level(item.get("detail_level"))
+            bucket = self._normalize_bucket(item.get("bucket"))
+            priority = self._normalize_priority(item.get("priority"))
+
+            is_required = self._normalize_bool(
+                item.get("is_required"),
+                default=bool(original_task.get("is_required", True)),
+            )
+            proof_required = self._normalize_bool(
+                item.get("proof_required"),
+                default=bool(original_task.get("proof_required", False)),
             )
 
-            technique_cues = self._fallback_technique_cues(task_type=task_type)
-            steps = self._fallback_steps(
-                title=title,
-                instructions=instructions,
-                estimated_minutes=estimated_minutes,
-                task_type=task_type,
-                detail_level=detail_level,
+            recommended_proof_type = self._normalize_proof_type(
+                item.get("recommended_proof_type")
+            )
+            if recommended_proof_type is None:
+                recommended_proof_type = self._normalize_proof_type(
+                    original_task.get("recommended_proof_type")
+                )
+
+            proof_prompt = self._safe_text(item.get("proof_prompt")) or self._safe_text(
+                original_task.get("proof_prompt")
             )
 
-            enriched_tasks.append(
+            task_type = self._normalize_task_type(item.get("task_type"))
+            if task_type == "generic":
+                task_type = self._normalize_task_type(original_task.get("task_type"))
+
+            difficulty = self._normalize_difficulty(item.get("difficulty"))
+            if difficulty is None:
+                difficulty = self._normalize_difficulty(original_task.get("difficulty"))
+
+            tips = self._normalize_string_list(item.get("tips"))
+            technique_cues = self._normalize_string_list(item.get("technique_cues"))
+            common_mistakes = self._normalize_string_list(item.get("common_mistakes"))
+
+            steps = self._normalize_steps(item.get("steps"))
+            resources = self._normalize_resources(item.get("resources"))
+
+            normalized_tasks.append(
                 {
                     "title": title,
-                    "objective": description or f"Complete: {title}",
+                    "objective": objective,
                     "description": description,
                     "instructions": instructions,
                     "why_today": why_today,
-                    "success_criteria": f"Task completed: {title}",
+                    "success_criteria": success_criteria,
                     "estimated_minutes": estimated_minutes,
                     "detail_level": detail_level,
                     "bucket": bucket,
@@ -354,518 +271,409 @@ class DailyTaskDetailingService:
                     "recommended_proof_type": recommended_proof_type,
                     "proof_prompt": proof_prompt,
                     "task_type": task_type,
-                    "difficulty": "medium",
-                    "tips": [],
+                    "difficulty": difficulty,
+                    "tips": tips,
                     "technique_cues": technique_cues,
-                    "common_mistakes": [],
+                    "common_mistakes": common_mistakes,
                     "steps": steps,
-                    "resources": [],
+                    "resources": resources,
                 }
             )
 
-        fallback_day["tasks"] = enriched_tasks
-        fallback_day["main_task_title"] = self._pick_main_task_title(enriched_tasks)
-        fallback_day["total_estimated_minutes"] = sum(
-            task.get("estimated_minutes") or 0 for task in enriched_tasks
-        )
+        return normalized_tasks
 
-        return fallback_day
-
-    def _infer_fallback_detail_level(self, *, task_type: str) -> int:
-        if task_type in {"fitness", "music", "speech", "drawing", "meditation", "rehab"}:
-            return 3
-        if task_type in {"language", "study", "work", "nutrition", "activity"}:
-            return 2
-        return 1
-
-    def _fallback_technique_cues(self, *, task_type: str) -> list[str]:
-        mapping = {
-            "fitness": [
-                "Move with control, not with momentum.",
-                "Stop if you feel pain.",
-            ],
-            "music": [
-                "Prioritize clean execution over speed.",
-                "Reduce tempo if quality drops.",
-            ],
-            "speech": [
-                "Focus on clarity before speed.",
-                "Keep breathing steady and controlled.",
-            ],
-            "drawing": [
-                "Focus on accuracy before adding detail.",
-                "Keep the hand relaxed and controlled.",
-            ],
-            "meditation": [
-                "Return attention gently when distracted.",
-                "Do not force the process.",
-            ],
-            "rehab": [
-                "Move carefully and without sharp pain.",
-                "Use conservative effort and controlled range.",
-            ],
-        }
-        return mapping.get(task_type, [])
-
-    def _fallback_steps(
-        self,
-        *,
-        title: str,
-        instructions: str,
-        estimated_minutes: int,
-        task_type: str,
-        detail_level: int,
-    ) -> list[dict[str, Any]]:
-        if detail_level == 1:
+    def _normalize_steps(self, raw_steps: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_steps, list):
             return []
 
-        if detail_level == 2:
-            first_block = max(5, estimated_minutes // 2)
-            second_block = max(5, estimated_minutes - first_block)
+        normalized_steps: list[dict[str, Any]] = []
 
-            return [
-                {
-                    "order": 1,
-                    "title": "Start the task",
-                    "instruction": instructions,
-                    "duration_minutes": first_block,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": None,
-                    "notes": [],
-                },
-                {
-                    "order": 2,
-                    "title": "Finish and verify",
-                    "instruction": f"Complete the task and verify the result for: {title}",
-                    "duration_minutes": second_block,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": None,
-                    "notes": [],
-                },
-            ]
-
-        if task_type == "fitness":
-            warmup_minutes = min(5, estimated_minutes)
-            main_minutes = max(5, estimated_minutes - warmup_minutes)
-
-            return [
-                {
-                    "order": 1,
-                    "title": "Warm-up",
-                    "instruction": "Do a short easy warm-up and prepare for the main work.",
-                    "duration_minutes": warmup_minutes,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": None,
-                    "notes": ["Keep intensity low at the start."],
-                },
-                {
-                    "order": 2,
-                    "title": "Main block",
-                    "instruction": instructions,
-                    "duration_minutes": main_minutes,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": 30,
-                    "notes": ["Use controlled technique.", "Stop if pain appears."],
-                },
-            ]
-
-        if task_type == "music":
-            warmup_minutes = min(5, estimated_minutes)
-            technical_minutes = max(5, estimated_minutes // 2)
-            application_minutes = max(5, estimated_minutes - warmup_minutes - technical_minutes)
-
-            return [
-                {
-                    "order": 1,
-                    "title": "Warm-up",
-                    "instruction": "Start with an easy warm-up to prepare hands and coordination.",
-                    "duration_minutes": warmup_minutes,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": None,
-                    "notes": ["Stay slow and clean."],
-                },
-                {
-                    "order": 2,
-                    "title": "Technical block",
-                    "instruction": instructions,
-                    "duration_minutes": technical_minutes,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": None,
-                    "notes": ["Prioritize clean execution over speed."],
-                },
-                {
-                    "order": 3,
-                    "title": "Application block",
-                    "instruction": "Apply the practiced skill in a short controlled run-through.",
-                    "duration_minutes": application_minutes,
-                    "sets": None,
-                    "reps": None,
-                    "rest_seconds": None,
-                    "notes": ["Do at least one clean full attempt."],
-                },
-            ]
-
-        setup_minutes = min(5, estimated_minutes)
-        main_minutes = max(5, estimated_minutes - setup_minutes)
-
-        return [
-            {
-                "order": 1,
-                "title": "Setup",
-                "instruction": "Prepare for the practice session.",
-                "duration_minutes": setup_minutes,
-                "sets": None,
-                "reps": None,
-                "rest_seconds": None,
-                "notes": [],
-            },
-            {
-                "order": 2,
-                "title": "Main practice",
-                "instruction": instructions,
-                "duration_minutes": main_minutes,
-                "sets": None,
-                "reps": None,
-                "rest_seconds": None,
-                "notes": [],
-            },
-        ]
-
-    def _pick_main_task_title(self, tasks: list[dict[str, Any]]) -> str | None:
-        if not tasks:
-            return None
-
-        high_priority_must_tasks = [
-            task for task in tasks
-            if task.get("bucket") == "must" and task.get("priority") == "high"
-        ]
-        if high_priority_must_tasks:
-            return str(high_priority_must_tasks[0].get("title"))
-
-        must_tasks = [task for task in tasks if task.get("bucket") == "must"]
-        if must_tasks:
-            return str(must_tasks[0].get("title"))
-
-        return str(tasks[0].get("title"))
-
-    def _normalize_ai_daily_checklist_payload(
-        self,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            return payload
-
-        normalized = deepcopy(payload)
-
-        tasks = normalized.get("tasks")
-        if not isinstance(tasks, list):
-            return normalized
-
-        normalized_tasks: list[dict[str, Any]] = []
-
-        for task in tasks:
-            if not isinstance(task, dict):
+        for index, item in enumerate(raw_steps, start=1):
+            if not isinstance(item, dict):
                 continue
-            normalized_tasks.append(self._normalize_ai_task_payload(task))
 
-        normalized["tasks"] = normalized_tasks
-        return normalized
+            title = self._safe_text(item.get("title")) or f"Step {index}"
+            instruction = self._safe_text(item.get("instruction"))
+            if not instruction:
+                continue
 
-    def _normalize_ai_task_payload(
-        self,
-        task: dict[str, Any],
-    ) -> dict[str, Any]:
-        normalized = deepcopy(task)
-
-        normalized["task_type"] = self._normalize_task_type(
-            normalized.get("task_type")
-        )
-        normalized["bucket"] = self._normalize_bucket(
-            normalized.get("bucket")
-        )
-        normalized["priority"] = self._normalize_priority(
-            normalized.get("priority")
-        )
-        normalized["difficulty"] = self._normalize_difficulty(
-            normalized.get("difficulty")
-        )
-        normalized["recommended_proof_type"] = self._normalize_proof_type(
-            normalized.get("recommended_proof_type")
-        )
-
-        proof_required = normalized.get("proof_required")
-        if isinstance(proof_required, str):
-            normalized["proof_required"] = proof_required.strip().lower() in {
-                "true", "1", "yes", "y"
-            }
-        else:
-            normalized["proof_required"] = bool(proof_required)
-
-        detail_level = normalized.get("detail_level")
-        try:
-            normalized["detail_level"] = int(detail_level)
-        except Exception:
-            normalized["detail_level"] = self._default_detail_level_for_task_type(
-                normalized["task_type"]
+            normalized_steps.append(
+                {
+                    "order": self._normalize_positive_int(item.get("order"), default=index),
+                    "title": title,
+                    "instruction": instruction,
+                    "duration_minutes": self._normalize_positive_int_or_none(
+                        item.get("duration_minutes")
+                    ),
+                    "sets": self._normalize_positive_int_or_none(item.get("sets")),
+                    "reps": self._normalize_positive_int_or_none(item.get("reps")),
+                    "rest_seconds": self._normalize_non_negative_int_or_none(
+                        item.get("rest_seconds")
+                    ),
+                    "notes": self._normalize_string_list(item.get("notes")),
+                }
             )
 
-        if normalized["proof_required"]:
-            if not normalized.get("recommended_proof_type"):
-                normalized["recommended_proof_type"] = self._default_proof_type_for_task_type(
-                    normalized.get("task_type")
-                )
+        return normalized_steps
 
-            proof_prompt = normalized.get("proof_prompt")
-            if proof_prompt is None or not str(proof_prompt).strip():
-                normalized["proof_prompt"] = self._default_proof_prompt(
-                    task_type=normalized.get("task_type"),
-                    proof_type=normalized.get("recommended_proof_type"),
-                    title=normalized.get("title"),
-                )
+    def _normalize_resources(self, raw_resources: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_resources, list):
+            return []
 
-        resources = normalized.get("resources")
-        if isinstance(resources, list):
-            fixed_resources: list[dict[str, Any]] = []
-            for resource in resources:
-                if not isinstance(resource, dict):
-                    continue
-                resource_copy = deepcopy(resource)
-                resource_copy["resource_type"] = self._normalize_resource_type(
-                    resource_copy.get("resource_type")
-                )
-                fixed_resources.append(resource_copy)
-            normalized["resources"] = fixed_resources
+        normalized_resources: list[dict[str, Any]] = []
 
-        steps = normalized.get("steps")
-        if isinstance(steps, list):
-            fixed_steps: list[dict[str, Any]] = []
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
+        for item in raw_resources:
+            if not isinstance(item, dict):
+                continue
 
-                step_copy = deepcopy(step)
+            title = self._safe_text(item.get("title"))
+            resource_type = self._normalize_resource_type(item.get("resource_type"))
+            note = self._safe_text(item.get("note"))
 
-                if step_copy.get("order") is not None:
-                    try:
-                        step_copy["order"] = max(1, int(step_copy["order"]))
-                    except Exception:
-                        step_copy["order"] = 1
-                else:
-                    step_copy["order"] = 1
+            if not title or not resource_type:
+                continue
 
-                if step_copy.get("duration_minutes") is not None:
-                    try:
-                        duration = int(step_copy["duration_minutes"])
-                        step_copy["duration_minutes"] = duration if duration >= 1 else None
-                    except Exception:
-                        step_copy["duration_minutes"] = None
+            normalized_resources.append(
+                {
+                    "title": title,
+                    "resource_type": resource_type,
+                    "note": note,
+                }
+            )
 
-                if step_copy.get("sets") is not None:
-                    try:
-                        sets = int(step_copy["sets"])
-                        step_copy["sets"] = sets if sets >= 1 else None
-                    except Exception:
-                        step_copy["sets"] = None
+        return normalized_resources
 
-                if step_copy.get("reps") is not None:
-                    try:
-                        reps = int(step_copy["reps"])
-                        step_copy["reps"] = reps if reps >= 1 else None
-                    except Exception:
-                        step_copy["reps"] = None
+    def _validate_ai_response(
+        self,
+        ai_response: AIDailyChecklistResponse,
+        *,
+        original_day: dict[str, Any],
+    ) -> None:
+        if not ai_response.headline.strip():
+            raise AIResponseValidationError("daily_ai_headline_empty")
 
-                if step_copy.get("rest_seconds") is not None:
-                    try:
-                        rest = int(step_copy["rest_seconds"])
-                        step_copy["rest_seconds"] = rest if rest >= 0 else None
-                    except Exception:
-                        step_copy["rest_seconds"] = None
+        tasks = ai_response.tasks
+        original_tasks = original_day.get("tasks", [])
+        min_required = 1 if not isinstance(original_tasks, list) else max(1, len(original_tasks))
 
-                fixed_steps.append(step_copy)
+        if len(tasks) < min_required:
+            raise AIResponseValidationError("daily_ai_not_enough_tasks")
 
-            normalized["steps"] = fixed_steps
+        forbidden_phrases = [
+            "stay focused",
+            "stay disciplined",
+            "give your best",
+            "stay consistent",
+            "постарайся",
+            "не сдавайся",
+            "будь дисциплинирован",
+            "просто сделай это",
+        ]
 
-        return normalized
+        for task in tasks:
+            if not task.title.strip():
+                raise AIResponseValidationError("daily_ai_task_title_empty")
 
-    def _normalize_task_type(self, value: Any) -> str:
-        allowed = {
-            "fitness",
-            "music",
-            "language",
-            "study",
-            "work",
-            "habit",
-            "speech",
-            "drawing",
-            "meditation",
-            "rehab",
-            "nutrition",
-            "activity",
-            "generic",
-        }
+            text_to_check = " ".join(
+                part
+                for part in [
+                    task.title,
+                    task.description or "",
+                    task.instructions or "",
+                    task.why_today or "",
+                    task.success_criteria or "",
+                ]
+                if part
+            ).lower()
 
-        if value is None:
-            return "generic"
+            for phrase in forbidden_phrases:
+                if phrase in text_to_check:
+                    raise AIResponseValidationError(
+                        f"daily_ai_contains_forbidden_phrase: {phrase}"
+                    )
 
-        text = str(value).strip().lower()
+            if task.is_required:
+                if not task.instructions:
+                    raise AIResponseValidationError("daily_ai_required_task_missing_instructions")
+                if not task.success_criteria:
+                    raise AIResponseValidationError(
+                        "daily_ai_required_task_missing_success_criteria"
+                    )
+                if not task.why_today:
+                    raise AIResponseValidationError("daily_ai_required_task_missing_why_today")
 
-        mapping = {
-            "planning": "work",
-            "tracking": "habit",
-            "exercise": "fitness",
-            "workout": "fitness",
-            "instrument": "music",
-            "practice": "study",
-            "learning": "study",
-            "productivity": "work",
-            "organization": "work",
-            "health": "habit",
-            "wellness": "habit",
-        }
+            if task.detail_level >= 2 and not task.steps:
+                practical_types = {
+                    "fitness",
+                    "music",
+                    "language",
+                    "study",
+                    "work",
+                    "speech",
+                    "drawing",
+                    "rehab",
+                    "nutrition",
+                    "activity",
+                }
+                if task.task_type in practical_types:
+                    raise AIResponseValidationError(
+                        "daily_ai_detailed_practical_task_missing_steps"
+                    )
 
-        normalized = mapping.get(text, text)
-        return normalized if normalized in allowed else "generic"
-
-    def _normalize_bucket(self, value: Any) -> str:
-        allowed = {"must", "should", "bonus"}
-
-        if value is None:
-            return "must"
-
-        text = str(value).strip().lower()
-        mapping = {
-            "required": "must",
-            "core": "must",
-            "important": "must",
-            "optional": "bonus",
-            "extra": "bonus",
-            "nice_to_have": "should",
-        }
-
-        normalized = mapping.get(text, text)
-        return normalized if normalized in allowed else "must"
-
-    def _normalize_priority(self, value: Any) -> str:
-        allowed = {"high", "medium", "low"}
-
-        if value is None:
-            return "medium"
-
-        text = str(value).strip().lower()
-        mapping = {
-            "urgent": "high",
-            "critical": "high",
-            "normal": "medium",
-            "standard": "medium",
-            "optional": "low",
-        }
-
-        normalized = mapping.get(text, text)
-        return normalized if normalized in allowed else "medium"
-
-    def _normalize_difficulty(self, value: Any) -> str | None:
-        allowed = {"easy", "medium", "hard"}
-
-        if value is None:
-            return None
-
-        text = str(value).strip().lower()
-        mapping = {
-            "beginner": "easy",
-            "light": "easy",
-            "moderate": "medium",
-            "intermediate": "medium",
-            "advanced": "hard",
-            "difficult": "hard",
-        }
-
-        normalized = mapping.get(text, text)
-        return normalized if normalized in allowed else None
-
-    def _normalize_proof_type(self, value: Any) -> str | None:
-        allowed = {"text", "photo", "screenshot", "file", "video"}
-
-        if value is None:
-            return None
-
-        text = str(value).strip().lower()
-        mapping = {
-            "image": "photo",
-            "picture": "photo",
-            "screen": "screenshot",
-            "doc": "file",
-            "document": "file",
-        }
-
-        normalized = mapping.get(text, text)
-        return normalized if normalized in allowed else None
-
-    def _normalize_resource_type(self, value: Any) -> str:
-        allowed = {"video", "article", "reference", "checklist", "tool"}
-
-        if value is None:
-            return "reference"
-
-        text = str(value).strip().lower()
-        mapping = {
-            "app": "tool",
-            "template": "checklist",
-            "guide": "reference",
-            "tutorial": "video",
-        }
-
-        normalized = mapping.get(text, text)
-        return normalized if normalized in allowed else "reference"
-
-    def _default_detail_level_for_task_type(self, task_type: str) -> int:
-        if task_type in {"fitness", "music", "speech", "drawing", "meditation", "rehab"}:
-            return 3
-        if task_type in {"language", "study", "work", "nutrition", "activity"}:
-            return 2
-        return 1
-
-    def _default_proof_type_for_task_type(self, task_type: Any) -> str:
-        task_type = str(task_type or "").strip().lower()
-
-        mapping = {
-            "fitness": "photo",
-            "music": "video",
-            "language": "text",
-            "study": "text",
-            "work": "screenshot",
-            "habit": "text",
-            "speech": "video",
-            "drawing": "photo",
-            "meditation": "text",
-            "rehab": "video",
-            "nutrition": "photo",
-            "activity": "photo",
-            "generic": "text",
-        }
-        return mapping.get(task_type, "text")
-
-    def _default_proof_prompt(
+    def _map_response_to_day_payload(
         self,
         *,
-        task_type: Any,
-        proof_type: Any,
-        title: Any,
-    ) -> str:
-        proof_type = str(proof_type or "text").strip().lower()
-        title = str(title or "the task").strip()
+        original_day: dict[str, Any],
+        ai_response: AIDailyChecklistResponse,
+    ) -> dict[str, Any]:
+        original_day_number = original_day.get("day_number")
+        original_planned_date = original_day.get("planned_date")
+        original_focus = original_day.get("focus")
+        original_summary = original_day.get("summary")
 
-        if proof_type == "photo":
-            return f"Send a photo confirming you completed: {title}."
-        if proof_type == "video":
-            return f"Send a short video clip showing the result of: {title}."
-        if proof_type == "screenshot":
-            return f"Send a screenshot confirming completion of: {title}."
-        if proof_type == "file":
-            return f"Send the file or document related to: {title}."
-        return f"Send a short text report describing how you completed: {title}."
+        return {
+            "day_number": original_day_number,
+            "planned_date": original_planned_date,
+            "focus": original_focus,
+            "summary": original_summary,
+            "headline": ai_response.headline,
+            "focus_message": ai_response.focus_message,
+            "main_task_title": ai_response.main_task_title,
+            "total_estimated_minutes": ai_response.total_estimated_minutes,
+            "tasks": [
+                {
+                    "title": task.title,
+                    "objective": task.objective,
+                    "description": task.description,
+                    "instructions": task.instructions,
+                    "why_today": task.why_today,
+                    "success_criteria": task.success_criteria,
+                    "estimated_minutes": task.estimated_minutes,
+                    "detail_level": task.detail_level,
+                    "bucket": task.bucket,
+                    "priority": task.priority,
+                    "is_required": task.is_required,
+                    "proof_required": task.proof_required,
+                    "recommended_proof_type": task.recommended_proof_type,
+                    "proof_prompt": task.proof_prompt,
+                    "task_type": task.task_type,
+                    "difficulty": task.difficulty,
+                    "tips": task.tips,
+                    "technique_cues": task.technique_cues,
+                    "common_mistakes": task.common_mistakes,
+                    "steps": [step.model_dump() for step in task.steps],
+                    "resources": [resource.model_dump() for resource in task.resources],
+                }
+                for task in ai_response.tasks
+            ],
+        }
+
+    def _build_retry_user_prompt(
+        self,
+        *,
+        original_user_prompt: str,
+        response_language: str,
+        original_day: dict[str, Any],
+    ) -> str:
+        original_task_count = len(original_day.get("tasks", [])) if isinstance(
+            original_day.get("tasks"), list
+        ) else 1
+
+        return f"""
+The previous answer was invalid.
+
+Fix it now.
+
+STRICT REQUIREMENTS:
+- Return valid JSON only
+- No markdown
+- No code fences
+- No explanations
+- All user-facing content must be strictly in {response_language}
+- Do not mix languages
+- Keep the same day scope
+- Return at least {max(1, original_task_count)} tasks
+- Headline must be non-empty
+- Every required task must include:
+  - instructions
+  - why_today
+  - success_criteria
+- For practical or skill-based tasks with detail_level >= 2, include step-by-step steps
+- Do not use motivational fluff
+- Do not use phrases like:
+  - stay focused
+  - stay disciplined
+  - give your best
+  - stay consistent
+  - постарайся
+  - не сдавайся
+  - будь дисциплинирован
+
+VALID ENUMS:
+- bucket: must, should, bonus
+- priority: high, medium, low
+- difficulty: easy, medium, hard
+- task_type:
+  fitness, music, language, study, work, habit, speech, drawing, meditation, rehab, nutrition, activity, generic
+- recommended_proof_type:
+  text, photo, screenshot, file, video
+- resource_type:
+  video, article, reference, checklist, tool
+
+RETURN JSON IN THIS SHAPE:
+{{
+  "headline": "string",
+  "focus_message": "string or null",
+  "main_task_title": "string or null",
+  "total_estimated_minutes": 90,
+  "tasks": [
+    {{
+      "title": "string",
+      "objective": "string or null",
+      "description": "string or null",
+      "instructions": "string or null",
+      "why_today": "string or null",
+      "success_criteria": "string or null",
+      "estimated_minutes": 30,
+      "detail_level": 2,
+      "bucket": "must",
+      "priority": "high",
+      "is_required": true,
+      "proof_required": true,
+      "recommended_proof_type": "text",
+      "proof_prompt": "string or null",
+      "task_type": "generic",
+      "difficulty": "medium",
+      "tips": [],
+      "technique_cues": [],
+      "common_mistakes": [],
+      "steps": [],
+      "resources": []
+    }}
+  ]
+}}
+
+Original task:
+{original_user_prompt}
+""".strip()
+
+    def _normalize_bucket(self, value: Any) -> str:
+        normalized = (self._safe_text(value) or "").lower()
+        return normalized if normalized in self.ALLOWED_BUCKETS else "must"
+
+    def _normalize_priority(self, value: Any) -> str:
+        normalized = (self._safe_text(value) or "").lower()
+        return normalized if normalized in self.ALLOWED_PRIORITIES else "medium"
+
+    def _normalize_difficulty(self, value: Any) -> str | None:
+        normalized = (self._safe_text(value) or "").lower()
+        return normalized if normalized in self.ALLOWED_DIFFICULTIES else None
+
+    def _normalize_task_type(self, value: Any) -> str:
+        normalized = (self._safe_text(value) or "").lower()
+        return normalized if normalized in self.ALLOWED_TASK_TYPES else "generic"
+
+    def _normalize_proof_type(self, value: Any) -> str | None:
+        normalized = (self._safe_text(value) or "").lower()
+        return normalized if normalized in self.ALLOWED_PROOF_TYPES else None
+
+    def _normalize_resource_type(self, value: Any) -> str | None:
+        normalized = (self._safe_text(value) or "").lower()
+        return normalized if normalized in self.ALLOWED_RESOURCE_TYPES else None
+
+    def _normalize_detail_level(self, value: Any) -> int:
+        parsed = self._normalize_positive_int(value, default=2)
+        if parsed < 1:
+            return 1
+        if parsed > 3:
+            return 3
+        return parsed
+
+    def _normalize_string_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, list):
+            result: list[str] = []
+            for item in value:
+                text_value = self._safe_text(item)
+                if text_value:
+                    result.append(text_value)
+            return result
+
+        text_value = self._safe_text(value)
+        return [text_value] if text_value else []
+
+    def _normalize_bool(self, raw_value: Any, default: bool) -> bool:
+        if isinstance(raw_value, bool):
+            return raw_value
+
+        if raw_value is None:
+            return default
+
+        text_value = str(raw_value).strip().lower()
+        if text_value in {"true", "1", "yes", "y"}:
+            return True
+        if text_value in {"false", "0", "no", "n"}:
+            return False
+
+        return default
+
+    def _normalize_positive_int(self, raw_value: Any, default: int) -> int:
+        if raw_value is None:
+            return default
+
+        if isinstance(raw_value, bool):
+            return default
+
+        if isinstance(raw_value, int):
+            return raw_value if raw_value > 0 else default
+
+        try:
+            parsed = int(str(raw_value).strip())
+            return parsed if parsed > 0 else default
+        except Exception:
+            return default
+
+    def _normalize_positive_int_or_none(self, raw_value: Any) -> int | None:
+        if raw_value is None or raw_value == "":
+            return None
+
+        if isinstance(raw_value, bool):
+            return None
+
+        if isinstance(raw_value, int):
+            return raw_value if raw_value > 0 else None
+
+        try:
+            parsed = int(str(raw_value).strip())
+            return parsed if parsed > 0 else None
+        except Exception:
+            return None
+
+    def _normalize_non_negative_int_or_none(self, raw_value: Any) -> int | None:
+        if raw_value is None or raw_value == "":
+            return None
+
+        if isinstance(raw_value, bool):
+            return None
+
+        if isinstance(raw_value, int):
+            return raw_value if raw_value >= 0 else None
+
+        try:
+            parsed = int(str(raw_value).strip())
+            return parsed if parsed >= 0 else None
+        except Exception:
+            return None
+
+    def _safe_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+
+        normalized = str(value).strip()
+        return normalized or None
