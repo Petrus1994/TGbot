@@ -251,7 +251,13 @@ class DailyTaskDetailingService:
             technique_cues = self._normalize_string_list(item.get("technique_cues"))
             common_mistakes = self._normalize_string_list(item.get("common_mistakes"))
 
-            steps = self._normalize_steps(item.get("steps"))
+            steps = self._normalize_steps(
+                raw_steps=item.get("steps"),
+                fallback_instructions=instructions,
+                fallback_task_title=title,
+                detail_level=detail_level,
+                task_type=task_type,
+            )
             resources = self._normalize_resources(item.get("resources"))
 
             normalized_tasks.append(
@@ -282,39 +288,81 @@ class DailyTaskDetailingService:
 
         return normalized_tasks
 
-    def _normalize_steps(self, raw_steps: Any) -> list[dict[str, Any]]:
-        if not isinstance(raw_steps, list):
-            return []
-
+    def _normalize_steps(
+        self,
+        *,
+        raw_steps: Any,
+        fallback_instructions: str | None,
+        fallback_task_title: str,
+        detail_level: int,
+        task_type: str,
+    ) -> list[dict[str, Any]]:
         normalized_steps: list[dict[str, Any]] = []
 
-        for index, item in enumerate(raw_steps, start=1):
-            if not isinstance(item, dict):
-                continue
+        if isinstance(raw_steps, list):
+            for index, item in enumerate(raw_steps, start=1):
+                if isinstance(item, dict):
+                    title = self._safe_text(item.get("title")) or f"Step {index}"
+                    instruction = self._safe_text(item.get("instruction")) or self._safe_text(
+                        item.get("description")
+                    )
+                    if not instruction:
+                        continue
 
-            title = self._safe_text(item.get("title")) or f"Step {index}"
-            instruction = self._safe_text(item.get("instruction"))
-            if not instruction:
-                continue
+                    normalized_steps.append(
+                        {
+                            "order": self._normalize_positive_int(item.get("order"), default=index),
+                            "title": title,
+                            "instruction": instruction,
+                            "duration_minutes": self._normalize_positive_int_or_none(
+                                item.get("duration_minutes")
+                            ),
+                            "sets": self._normalize_positive_int_or_none(item.get("sets")),
+                            "reps": self._normalize_positive_int_or_none(item.get("reps")),
+                            "rest_seconds": self._normalize_non_negative_int_or_none(
+                                item.get("rest_seconds")
+                            ),
+                            "notes": self._normalize_string_list(item.get("notes")),
+                        }
+                    )
+                    continue
 
-            normalized_steps.append(
+                if isinstance(item, str):
+                    instruction = self._safe_text(item)
+                    if not instruction:
+                        continue
+
+                    normalized_steps.append(
+                        {
+                            "order": index,
+                            "title": f"Step {index}",
+                            "instruction": instruction,
+                            "duration_minutes": None,
+                            "sets": None,
+                            "reps": None,
+                            "rest_seconds": None,
+                            "notes": [],
+                        }
+                    )
+
+        if normalized_steps:
+            return normalized_steps
+
+        if self._task_should_have_steps(task_type=task_type, detail_level=detail_level) and fallback_instructions:
+            return [
                 {
-                    "order": self._normalize_positive_int(item.get("order"), default=index),
-                    "title": title,
-                    "instruction": instruction,
-                    "duration_minutes": self._normalize_positive_int_or_none(
-                        item.get("duration_minutes")
-                    ),
-                    "sets": self._normalize_positive_int_or_none(item.get("sets")),
-                    "reps": self._normalize_positive_int_or_none(item.get("reps")),
-                    "rest_seconds": self._normalize_non_negative_int_or_none(
-                        item.get("rest_seconds")
-                    ),
-                    "notes": self._normalize_string_list(item.get("notes")),
+                    "order": 1,
+                    "title": fallback_task_title,
+                    "instruction": fallback_instructions,
+                    "duration_minutes": None,
+                    "sets": None,
+                    "reps": None,
+                    "rest_seconds": None,
+                    "notes": [],
                 }
-            )
+            ]
 
-        return normalized_steps
+        return []
 
     def _normalize_resources(self, raw_resources: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_resources, list):
@@ -402,23 +450,26 @@ class DailyTaskDetailingService:
                 if not task.why_today:
                     raise AIResponseValidationError("daily_ai_required_task_missing_why_today")
 
-            if task.detail_level >= 2 and not task.steps:
-                practical_types = {
-                    "fitness",
-                    "music",
-                    "language",
-                    "study",
-                    "work",
-                    "speech",
-                    "drawing",
-                    "rehab",
-                    "nutrition",
-                    "activity",
-                }
-                if task.task_type in practical_types:
+            if self._task_should_have_steps(task_type=task.task_type, detail_level=task.detail_level):
+                if not task.steps:
                     raise AIResponseValidationError(
                         "daily_ai_detailed_practical_task_missing_steps"
                     )
+
+    def _task_should_have_steps(self, *, task_type: str, detail_level: int) -> bool:
+        practical_types = {
+            "fitness",
+            "music",
+            "language",
+            "study",
+            "work",
+            "speech",
+            "drawing",
+            "rehab",
+            "nutrition",
+            "activity",
+        }
+        return detail_level >= 2 and task_type in practical_types
 
     def _map_response_to_day_payload(
         self,
@@ -498,7 +549,11 @@ STRICT REQUIREMENTS:
   - instructions
   - why_today
   - success_criteria
-- For practical or skill-based tasks with detail_level >= 2, include step-by-step steps
+- For practical or skill-based tasks with detail_level >= 2, steps are mandatory
+- steps must be either:
+  - a list of objects with fields title and instruction
+  - or a list of non-empty strings
+- Do not return an empty steps list for practical tasks
 - Do not use motivational fluff
 - Do not use phrases like:
   - stay focused
@@ -547,7 +602,13 @@ RETURN JSON IN THIS SHAPE:
       "tips": [],
       "technique_cues": [],
       "common_mistakes": [],
-      "steps": [],
+      "steps": [
+        {{
+          "order": 1,
+          "title": "step title",
+          "instruction": "step instruction"
+        }}
+      ],
       "resources": []
     }}
   ]
