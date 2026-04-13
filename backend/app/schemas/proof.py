@@ -5,7 +5,6 @@ from app.models.proof import ProofStatus, ProofType
 
 
 class CreateProofRequest(BaseModel):
-    goal_id: str | None = None
     telegram_file_id: str | None = None
     file_unique_id: str | None = None
     proof_type: ProofType
@@ -15,15 +14,17 @@ class CreateProofRequest(BaseModel):
     text: str | None = None
 
 
-class UpdateProofStatusRequest(BaseModel):
+class ReviewProofRequest(BaseModel):
     status: ProofStatus
+    review_message: str | None = None
 
 
 class ProofResponse(BaseModel):
     proof_id: str
     goal_id: str
-    checkin_id: str
-    step_id: str
+    daily_plan_id: str
+    daily_task_id: str
+
     proof_type: ProofType
     telegram_file_id: str | None = None
     file_unique_id: str | None = None
@@ -31,6 +32,10 @@ class ProofResponse(BaseModel):
     filename: str | None = None
     caption: str | None = None
     text: str | None = None
+
     status: ProofStatus
+    review_message: str | None = None
+
+    submitted_at: datetime
+    reviewed_at: datetime | None = None
     created_at: datetime
-    updated_at: datetime
