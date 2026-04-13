@@ -1,76 +1,233 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
-from uuid import uuid4
 
-from app.models.proof import ProofStatus, ProofType
-from app.schemas.proof import CreateProofRequest, ProofResponse
-from app.services.checkin_service import _find_checkin_by_id
+from sqlalchemy import text
 
-_PROOF_STORE: dict[str, dict] = {}
+from app.db import engine
+from app.models.proof import ProofStatus
+from app.schemas.proof import (
+    CreateProofRequest,
+    ProofResponse,
+    ReviewProofRequest,
+)
 
-
-def create_proof(checkin_id: str, step_id: str, payload: CreateProofRequest) -> ProofResponse:
-    checkin = _find_checkin_by_id(checkin_id)
-    if not checkin:
-        raise ValueError("Check-in not found.")
-
-    step_exists = any(step["step_id"] == step_id for step in checkin["steps"])
-    if not step_exists:
-        raise ValueError("Step not found in this check-in.")
-
-    if payload.proof_type != ProofType.text and not payload.telegram_file_id:
-        raise ValueError("telegram_file_id is required for photo/screenshot/file proof.")
-
-    if payload.proof_type == ProofType.text and not payload.text:
-        raise ValueError("text is required for text proof.")
-
-    now = datetime.now(timezone.utc)
-    proof_id = str(uuid4())
-
-    proof = {
-        "proof_id": proof_id,
-        "goal_id": payload.goal_id or checkin["goal_id"],
-        "checkin_id": checkin_id,
-        "step_id": step_id,
-        "proof_type": payload.proof_type,
-        "telegram_file_id": payload.telegram_file_id,
-        "file_unique_id": payload.file_unique_id,
-        "mime_type": payload.mime_type,
-        "filename": payload.filename,
-        "caption": payload.caption,
-        "text": payload.text,
-        "status": ProofStatus.uploaded,
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    _PROOF_STORE[proof_id] = proof
-    return ProofResponse(**proof)
+# 🔥 NEW
+from app.services.ai_proof_review_service import run_ai_proof_review
 
 
-def list_checkin_proofs(checkin_id: str) -> list[ProofResponse]:
-    proofs = [
-        ProofResponse(**proof)
-        for proof in _PROOF_STORE.values()
-        if proof["checkin_id"] == checkin_id
-    ]
-    return sorted(proofs, key=lambda p: p.created_at)
+ACCEPTED_LIKE_PROOF_STATUSES = {
+    ProofStatus.accepted.value,
+}
 
 
-def list_step_proofs(checkin_id: str, step_id: str) -> list[ProofResponse]:
-    proofs = [
-        ProofResponse(**proof)
-        for proof in _PROOF_STORE.values()
-        if proof["checkin_id"] == checkin_id and proof["step_id"] == step_id
-    ]
-    return sorted(proofs, key=lambda p: p.created_at)
+def _map_row_to_proof_response(row) -> ProofResponse:
+    return ProofResponse(
+        proof_id=str(row["id"]),
+        goal_id=str(row["goal_id"]),
+        daily_plan_id=str(row["daily_plan_id"]),
+        daily_task_id=str(row["daily_task_id"]),
+        proof_type=row["proof_type"],
+        telegram_file_id=row["telegram_file_id"],
+        file_unique_id=row["file_unique_id"],
+        mime_type=row["mime_type"],
+        filename=row["filename"],
+        caption=row["caption"],
+        text=row["text"],
+        status=row["status"],
+        review_message=row["review_message"],
+        submitted_at=row["submitted_at"],
+        reviewed_at=row["reviewed_at"],
+        created_at=row["created_at"],
+    )
 
 
-def update_proof_status(proof_id: str, status: ProofStatus) -> ProofResponse:
-    proof = _PROOF_STORE.get(proof_id)
-    if not proof:
-        raise ValueError("Proof not found.")
+def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofResponse | None:
+    with engine.begin() as conn:
+        task_row = conn.execute(
+            text(
+                """
+                SELECT id, goal_id, daily_plan_id
+                FROM daily_tasks
+                WHERE id = :task_id
+                LIMIT 1
+                """
+            ),
+            {"task_id": task_id},
+        ).mappings().first()
 
-    proof["status"] = status
-    proof["updated_at"] = datetime.now(timezone.utc)
+        if not task_row:
+            return None
 
-    return ProofResponse(**proof)
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO proofs (
+                    goal_id,
+                    daily_plan_id,
+                    daily_task_id,
+                    proof_type,
+                    telegram_file_id,
+                    file_unique_id,
+                    mime_type,
+                    filename,
+                    caption,
+                    text,
+                    status,
+                    submitted_at
+                )
+                VALUES (
+                    :goal_id,
+                    :daily_plan_id,
+                    :daily_task_id,
+                    :proof_type,
+                    :telegram_file_id,
+                    :file_unique_id,
+                    :mime_type,
+                    :filename,
+                    :caption,
+                    :text,
+                    :status,
+                    :submitted_at
+                )
+                RETURNING *
+                """
+            ),
+            {
+                "goal_id": str(task_row["goal_id"]),
+                "daily_plan_id": str(task_row["daily_plan_id"]),
+                "daily_task_id": task_id,
+                "proof_type": payload.proof_type.value,
+                "telegram_file_id": payload.telegram_file_id,
+                "file_unique_id": payload.file_unique_id,
+                "mime_type": payload.mime_type,
+                "filename": payload.filename,
+                "caption": payload.caption,
+                "text": payload.text,
+                "status": ProofStatus.uploaded.value,
+                "submitted_at": datetime.now(timezone.utc),
+            },
+        ).mappings().one()
+
+    proof = _map_row_to_proof_response(row)
+
+    # 🔥 AI REVIEW (ключевая часть)
+    try:
+        run_ai_proof_review(proof.proof_id)
+    except Exception:
+        # не ломаем UX если AI упал
+        pass
+
+    return proof
+
+
+def list_task_proofs(task_id: str) -> list[ProofResponse]:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT *
+                FROM proofs
+                WHERE daily_task_id = :task_id
+                ORDER BY created_at ASC
+                """
+            ),
+            {"task_id": task_id},
+        ).mappings().all()
+
+        return [_map_row_to_proof_response(row) for row in rows]
+
+
+def review_proof(proof_id: str, payload: ReviewProofRequest) -> ProofResponse | None:
+    with engine.begin() as conn:
+        existing = conn.execute(
+            text(
+                "SELECT id FROM proofs WHERE id = :proof_id LIMIT 1"
+            ),
+            {"proof_id": proof_id},
+        ).mappings().first()
+
+        if not existing:
+            return None
+
+        reviewed_at = (
+            datetime.now(timezone.utc)
+            if payload.status in {
+                ProofStatus.accepted,
+                ProofStatus.rejected,
+                ProofStatus.needs_more,
+            }
+            else None
+        )
+
+        row = conn.execute(
+            text(
+                """
+                UPDATE proofs
+                SET
+                    status = :status,
+                    review_message = :review_message,
+                    reviewed_at = :reviewed_at,
+                    updated_at = NOW()
+                WHERE id = :proof_id
+                RETURNING *
+                """
+            ),
+            {
+                "proof_id": proof_id,
+                "status": payload.status.value,
+                "review_message": payload.review_message,
+                "reviewed_at": reviewed_at,
+            },
+        ).mappings().one()
+
+        return _map_row_to_proof_response(row)
+
+
+# 🔥 ВАЖНО: теперь только accepted считается валидным
+def task_has_required_proof(task_id: str) -> bool:
+    return task_has_accepted_required_proof(task_id)
+
+
+def task_has_accepted_required_proof(task_id: str) -> bool:
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM proofs
+                    WHERE daily_task_id = :task_id
+                      AND status = 'accepted'
+                )
+                """
+            ),
+            {"task_id": task_id},
+        ).scalar()
+
+        return bool(row)
+
+
+def daily_plan_all_required_proofs_present(daily_plan_id: str) -> bool:
+    with engine.begin() as conn:
+        stats = conn.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE proof_required = TRUE) AS required_tasks,
+                    COUNT(*) FILTER (
+                        WHERE proof_required = TRUE
+                        AND EXISTS (
+                            SELECT 1 FROM proofs p
+                            WHERE p.daily_task_id = daily_tasks.id
+                              AND p.status = 'accepted'
+                        )
+                    ) AS satisfied_required_tasks
+                FROM daily_tasks
+                WHERE daily_plan_id = :daily_plan_id
+                """
+            ),
+            {"daily_plan_id": daily_plan_id},
+        ).mappings().one()
+
+        return int(stats["required_tasks"] or 0) == int(stats["satisfied_required_tasks"] or 0)
