@@ -2,14 +2,15 @@ from enum import Enum
 
 
 class ProofType(str, Enum):
+    text = "text"
     photo = "photo"
     screenshot = "screenshot"
     file = "file"
-    text = "text"
+    video = "video"
 
 
 class ProofStatus(str, Enum):
     uploaded = "uploaded"
-    pending_review = "pending_review"
     accepted = "accepted"
     rejected = "rejected"
+    needs_more = "needs_more"

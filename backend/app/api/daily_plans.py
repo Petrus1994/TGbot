@@ -9,8 +9,8 @@ from app.schemas.daily_plan import (
     TodayPlanResponse,
 )
 from app.services.daily_plan_service import (
-    enrich_today_plan_if_needed,
     enrich_next_actionable_daily_plan_if_needed,
+    enrich_today_plan_if_needed,
     get_daily_plan_by_day_number,
     get_goal_daily_plans,
     update_daily_plan_status,
@@ -28,7 +28,6 @@ def list_goal_daily_plans(goal_id: str):
     return get_goal_daily_plans(goal_id)
 
 
-# 🔴 СТАРЫЙ endpoint (оставляем для совместимости)
 @router.get(
     "/goals/{goal_id}/daily-plans/today",
     response_model=TodayPlanResponse,
@@ -42,18 +41,11 @@ async def get_goal_today_plan(goal_id: str):
     )
 
 
-# ✅ НОВЫЙ endpoint — ГЛАВНЫЙ ДЛЯ БОТА
 @router.get(
     "/goals/{goal_id}/daily-plans/next",
     response_model=TodayPlanResponse,
 )
 async def get_next_actionable_plan(goal_id: str):
-    """
-    Логика:
-    - если пользователь только начал → вернуть day 1 СРАЗУ
-    - если уже начал → вернуть следующий pending день
-    - если сегодня не его день → вернуть None
-    """
     daily_plan = await enrich_next_actionable_daily_plan_if_needed(goal_id)
 
     return TodayPlanResponse(
@@ -83,7 +75,13 @@ def get_goal_daily_plan_by_day(goal_id: str, day_number: int):
     response_model=DailyPlanResponse,
 )
 def set_daily_task_status(task_id: str, payload: DailyTaskStatusUpdateRequest):
-    daily_plan = update_daily_task_status(task_id, payload.status)
+    try:
+        daily_plan = update_daily_task_status(task_id, payload.status)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
 
     if not daily_plan:
         raise HTTPException(
@@ -102,7 +100,13 @@ def set_daily_plan_status(
     daily_plan_id: str,
     payload: DailyPlanStatusUpdateRequest,
 ):
-    daily_plan = update_daily_plan_status(daily_plan_id, payload.status)
+    try:
+        daily_plan = update_daily_plan_status(daily_plan_id, payload.status)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
 
     if not daily_plan:
         raise HTTPException(

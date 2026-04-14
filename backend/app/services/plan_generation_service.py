@@ -135,8 +135,27 @@ This includes:
 - step descriptions
 - task titles
 - task descriptions
+- proof prompts
 
 Do not mix languages.
+
+PROOF DESIGN RULES:
+For every recurring task, provide:
+- proof_required
+- proof_type
+- proof_prompt
+
+Proofs must be EASY but VALID.
+Do not require full process recording.
+Use lightweight believable proofs.
+
+Examples:
+- Reading -> photo of current page/spread is enough
+- Workout -> photo in workout context or short completion note is enough
+- Coding -> screenshot of code/editor is enough
+- Writing -> screenshot or pasted text is enough
+- Learning app -> screenshot of lesson/progress is enough
+- Planning/reflection -> short text summary is enough
 """
 
         ai_response = await self._generate_with_retry(
@@ -270,6 +289,13 @@ Do not mix languages.
                 item.get("proof_required"),
                 default=True,
             )
+            proof_prompt = self._normalize_proof_prompt(
+                raw_prompt=item.get("proof_prompt"),
+                title=title,
+                description=description,
+                proof_type=proof_type,
+                proof_required=proof_required,
+            )
 
             normalized_tasks.append(
                 {
@@ -279,6 +305,7 @@ Do not mix languages.
                     "cadence_config": cadence_config,
                     "proof_type": proof_type,
                     "proof_required": proof_required,
+                    "proof_prompt": proof_prompt,
                 }
             )
 
@@ -415,6 +442,201 @@ Do not mix languages.
             return value
 
         return "text"
+
+    def _normalize_proof_prompt(
+        self,
+        *,
+        raw_prompt: Any,
+        title: str,
+        description: str,
+        proof_type: str,
+        proof_required: bool,
+    ) -> str | None:
+        if not proof_required:
+            return None
+
+        prompt = self._safe_text(raw_prompt)
+        if prompt:
+            return prompt
+
+        return self._build_default_proof_prompt(
+            title=title,
+            description=description,
+            proof_type=proof_type,
+        )
+
+    def _build_default_proof_prompt(
+        self,
+        *,
+        title: str,
+        description: str,
+        proof_type: str,
+    ) -> str:
+        combined = f"{title} {description}".lower()
+
+        reading_keywords = [
+            "read",
+            "reading",
+            "book",
+            "chapter",
+            "pages",
+            "страниц",
+            "страницы",
+            "книг",
+            "книга",
+            "читать",
+            "прочитать",
+            "глава",
+        ]
+        workout_keywords = [
+            "workout",
+            "exercise",
+            "training",
+            "gym",
+            "run",
+            "cardio",
+            "squat",
+            "push-up",
+            "pull-up",
+            "stretch",
+            "трениров",
+            "присед",
+            "бег",
+            "зал",
+            "кардио",
+            "упражн",
+            "растяж",
+        ]
+        coding_keywords = [
+            "code",
+            "coding",
+            "program",
+            "repository",
+            "repo",
+            "app",
+            "script",
+            "debug",
+            "fix",
+            "develop",
+            "python",
+            "backend",
+            "frontend",
+            "код",
+            "скрипт",
+            "репозитор",
+            "разработ",
+            "программ",
+            "дебаг",
+            "исправ",
+        ]
+        writing_keywords = [
+            "write",
+            "writing",
+            "draft",
+            "journal",
+            "essay",
+            "post",
+            "article",
+            "outline",
+            "писать",
+            "текст",
+            "пост",
+            "статья",
+            "черновик",
+            "заметка",
+        ]
+        app_learning_keywords = [
+            "lesson",
+            "duolingo",
+            "course",
+            "module",
+            "quiz",
+            "practice",
+            "learn",
+            "study app",
+            "урок",
+            "курс",
+            "модуль",
+            "квиз",
+            "уроков",
+        ]
+        planning_keywords = [
+            "plan",
+            "planning",
+            "reflect",
+            "reflection",
+            "review",
+            "analyze",
+            "journal",
+            "план",
+            "рефлек",
+            "разбор",
+            "анализ",
+            "отчет",
+            "итоги",
+        ]
+
+        if any(keyword in combined for keyword in reading_keywords):
+            return (
+                "Сфотографируй страницу или разворот, на котором остановился, "
+                "чтобы было видно реальный прогресс по чтению."
+            )
+
+        if any(keyword in combined for keyword in workout_keywords):
+            if proof_type == "photo":
+                return (
+                    "Сделай фото в контексте тренировки: в форме, в зале, на пробежке "
+                    "или во время одного из упражнений."
+                )
+            return (
+                "Кратко напиши, что именно сделал: упражнение, количество повторений "
+                "или длительность тренировки."
+            )
+
+        if any(keyword in combined for keyword in coding_keywords):
+            return (
+                "Пришли скрин редактора, кода, коммита или результата запуска, "
+                "чтобы был виден конкретный прогресс."
+            )
+
+        if any(keyword in combined for keyword in writing_keywords):
+            if proof_type == "screenshot":
+                return (
+                    "Пришли скрин текста, заметки или черновика, чтобы было видно, "
+                    "что работа реально сделана."
+                )
+            return (
+                "Отправь 1–3 предложения из написанного или коротко опиши, "
+                "что именно закончил."
+            )
+
+        if any(keyword in combined for keyword in app_learning_keywords):
+            return (
+                "Пришли скрин урока, прогресса или завершенного блока в приложении."
+            )
+
+        if any(keyword in combined for keyword in planning_keywords):
+            return (
+                "Напиши короткий конкретный итог: что решил, что запланировал "
+                "или какой вывод сделал."
+            )
+
+        if proof_type == "photo":
+            return (
+                "Сделай простое фото, которое показывает контекст выполнения задачи."
+            )
+        if proof_type == "screenshot":
+            return (
+                "Пришли скрин, на котором видно результат или прогресс по задаче."
+            )
+        if proof_type == "file":
+            return (
+                "Прикрепи файл или материал, который подтверждает выполнение задачи."
+            )
+
+        return (
+            "Коротко напиши, что именно сделал и какой конкретный результат получил."
+        )
 
     def _normalize_duration_weeks(self, raw_value: Any) -> int:
         normalized = self._normalize_positive_int(raw_value, default=4)
@@ -706,6 +928,11 @@ Do not mix languages.
                 if not all(isinstance(day, int) and 1 <= day <= 7 for day in days_of_week):
                     raise AIResponseValidationError("ai_task_days_of_week_out_of_range")
 
+            proof_prompt = getattr(task, "proof_prompt", None)
+            if task.proof_required:
+                if not proof_prompt or not str(proof_prompt).strip():
+                    raise AIResponseValidationError("ai_task_proof_prompt_empty")
+
     def _map_to_plan_payload(
         self,
         *,
@@ -721,6 +948,7 @@ Do not mix languages.
                 "cadence_config": task.cadence_config,
                 "proof_type": task.proof_type,
                 "proof_required": task.proof_required,
+                "proof_prompt": getattr(task, "proof_prompt", None),
                 "order": index,
             }
             for index, task in enumerate(ai_response.tasks, start=1)
@@ -790,7 +1018,7 @@ Do not mix languages.
                             "is_required": True,
                             "proof_required": task.proof_required,
                             "recommended_proof_type": task.proof_type,
-                            "proof_prompt": None,
+                            "proof_prompt": getattr(task, "proof_prompt", None),
                             "task_type": None,
                             "difficulty": None,
                             "tips": [],
@@ -818,7 +1046,7 @@ Do not mix languages.
                         "is_required": True,
                         "proof_required": fallback_task.proof_required,
                         "recommended_proof_type": fallback_task.proof_type,
-                        "proof_prompt": None,
+                        "proof_prompt": getattr(fallback_task, "proof_prompt", None),
                         "task_type": None,
                         "difficulty": None,
                         "tips": [],
@@ -933,6 +1161,9 @@ Strict requirements:
   - photo
   - screenshot
   - file
+- Every task must contain proof_prompt
+- Proofs must be easy but valid
+- Do not require full process recording
 - If cadence_type is daily -> cadence_config must be {{}}
 - If cadence_type is weekly -> cadence_config must include integer times_per_week
 - If cadence_type is specific_weekdays -> cadence_config must include days_of_week with integers from 1 to 7
@@ -967,7 +1198,8 @@ Return JSON in this exact format:
       "cadence_type": "daily",
       "cadence_config": {{}},
       "proof_type": "text",
-      "proof_required": true
+      "proof_required": true,
+      "proof_prompt": "very easy but valid proof instruction"
     }}
   ]
 }}

@@ -238,6 +238,15 @@ class DailyTaskDetailingService:
             proof_prompt = self._safe_text(item.get("proof_prompt")) or self._safe_text(
                 original_task.get("proof_prompt")
             )
+            proof_prompt = self._normalize_proof_prompt(
+                proof_prompt=proof_prompt,
+                title=title,
+                description=description,
+                instructions=instructions,
+                success_criteria=success_criteria,
+                recommended_proof_type=recommended_proof_type,
+                proof_required=proof_required,
+            )
 
             task_type = self._normalize_task_type(item.get("task_type"))
             if task_type == "generic":
@@ -430,6 +439,7 @@ class DailyTaskDetailingService:
                     task.instructions or "",
                     task.why_today or "",
                     task.success_criteria or "",
+                    task.proof_prompt or "",
                 ]
                 if part
             ).lower()
@@ -449,6 +459,9 @@ class DailyTaskDetailingService:
                     )
                 if not task.why_today:
                     raise AIResponseValidationError("daily_ai_required_task_missing_why_today")
+
+            if task.proof_required and not (task.proof_prompt and task.proof_prompt.strip()):
+                raise AIResponseValidationError("daily_ai_required_task_missing_proof_prompt")
 
             if self._task_should_have_steps(task_type=task.task_type, detail_level=task.detail_level):
                 if not task.steps:
@@ -470,6 +483,173 @@ class DailyTaskDetailingService:
             "activity",
         }
         return detail_level >= 2 and task_type in practical_types
+
+    def _normalize_proof_prompt(
+        self,
+        *,
+        proof_prompt: str | None,
+        title: str,
+        description: str | None,
+        instructions: str | None,
+        success_criteria: str | None,
+        recommended_proof_type: str | None,
+        proof_required: bool,
+    ) -> str | None:
+        if not proof_required:
+            return None
+
+        if proof_prompt:
+            return proof_prompt
+
+        proof_type = recommended_proof_type or "text"
+        combined = " ".join(
+            part for part in [title, description, instructions, success_criteria] if part
+        ).lower()
+
+        reading_keywords = [
+            "read",
+            "reading",
+            "book",
+            "chapter",
+            "pages",
+            "читать",
+            "прочитать",
+            "книга",
+            "страниц",
+            "глава",
+        ]
+        workout_keywords = [
+            "workout",
+            "exercise",
+            "training",
+            "gym",
+            "run",
+            "cardio",
+            "squat",
+            "push",
+            "pull",
+            "stretch",
+            "трениров",
+            "упражн",
+            "зал",
+            "бег",
+            "присед",
+            "кардио",
+        ]
+        coding_keywords = [
+            "code",
+            "coding",
+            "program",
+            "script",
+            "debug",
+            "fix",
+            "backend",
+            "frontend",
+            "python",
+            "код",
+            "скрипт",
+            "программ",
+            "разработ",
+            "исправ",
+        ]
+        writing_keywords = [
+            "write",
+            "writing",
+            "essay",
+            "draft",
+            "post",
+            "article",
+            "journal",
+            "outline",
+            "писать",
+            "текст",
+            "статья",
+            "пост",
+            "черновик",
+            "заметка",
+        ]
+        app_keywords = [
+            "lesson",
+            "course",
+            "module",
+            "quiz",
+            "app",
+            "duolingo",
+            "урок",
+            "курс",
+            "модуль",
+            "прилож",
+        ]
+        planning_keywords = [
+            "plan",
+            "planning",
+            "reflect",
+            "review",
+            "analyze",
+            "journal",
+            "план",
+            "разбор",
+            "рефлек",
+            "анализ",
+            "отчет",
+            "итоги",
+        ]
+
+        if any(keyword in combined for keyword in reading_keywords):
+            return (
+                "Сфотографируй страницу или разворот, на котором остановился, "
+                "чтобы было видно прогресс по чтению."
+            )
+
+        if any(keyword in combined for keyword in workout_keywords):
+            if proof_type == "photo":
+                return (
+                    "Сделай фото в контексте тренировки: в форме, в зале, на пробежке "
+                    "или во время одного упражнения."
+                )
+            if proof_type == "video":
+                return (
+                    "Пришли короткое видео на несколько секунд с одним фрагментом упражнения "
+                    "или результатом тренировки."
+                )
+            return (
+                "Коротко напиши, что именно сделал: упражнения, повторения, подходы "
+                "или длительность."
+            )
+
+        if any(keyword in combined for keyword in coding_keywords):
+            return (
+                "Пришли скрин редактора, кода, коммита или результата запуска, "
+                "чтобы был виден конкретный прогресс."
+            )
+
+        if any(keyword in combined for keyword in writing_keywords):
+            if proof_type == "screenshot":
+                return "Пришли скрин текста или заметки, чтобы было видно результат."
+            return (
+                "Отправь короткий фрагмент написанного или 1–2 предложения о том, "
+                "что именно закончил."
+            )
+
+        if any(keyword in combined for keyword in app_keywords):
+            return "Пришли скрин прогресса, урока или завершенного блока в приложении."
+
+        if any(keyword in combined for keyword in planning_keywords):
+            return (
+                "Напиши короткий конкретный итог: что решил, что запланировал "
+                "или какой вывод сделал."
+            )
+
+        if proof_type == "photo":
+            return "Сделай простое фото, которое показывает контекст выполнения задачи."
+        if proof_type == "screenshot":
+            return "Пришли скрин, на котором видно результат или прогресс по задаче."
+        if proof_type == "file":
+            return "Прикрепи файл или материал, который подтверждает выполнение задачи."
+        if proof_type == "video":
+            return "Пришли короткое видео, которое подтверждает выполнение задачи."
+
+        return "Коротко напиши, что именно сделал и какой конкретный результат получил."
 
     def _map_response_to_day_payload(
         self,
@@ -549,6 +729,9 @@ STRICT REQUIREMENTS:
   - instructions
   - why_today
   - success_criteria
+- If proof_required is true, proof_prompt is mandatory
+- Proof instructions must be EASY but VALID
+- Do not require full process recording
 - For practical or skill-based tasks with detail_level >= 2, steps are mandatory
 - steps must be either:
   - a list of objects with fields title and instruction
@@ -596,7 +779,7 @@ RETURN JSON IN THIS SHAPE:
       "is_required": true,
       "proof_required": true,
       "recommended_proof_type": "text",
-      "proof_prompt": "string or null",
+      "proof_prompt": "easy but valid proof instruction",
       "task_type": "generic",
       "difficulty": "medium",
       "tips": [],

@@ -18,7 +18,18 @@ from app.schemas.daily_plan import (
     GeneratedDailyPlan,
 )
 from app.schemas.goal_generation import GoalGenerationContext
+from app.services.daily_cycle_service import (
+    assign_first_cycle_for_goal,
+    complete_cycle_for_daily_plan,
+    get_active_cycle,
+    unlock_next_cycle_after_completion,
+)
 from app.services.daily_task_detailing_service import DailyTaskDetailingService
+from app.services.proof_service import (
+    daily_plan_all_required_proofs_present,
+    list_task_proofs,
+    task_has_required_proof,
+)
 
 
 def _parse_date(value: Any) -> date | None:
@@ -29,7 +40,10 @@ def _parse_date(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, str):
-        return date.fromisoformat(value)
+        try:
+            return date.fromisoformat(value)
+        except Exception:
+            return None
     return None
 
 
@@ -135,11 +149,30 @@ def _safe_list(value: Any) -> list[Any]:
         return []
     if isinstance(value, list):
         return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _safe_json_array(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            return []
     return []
 
 
 def _parse_task_steps(value: Any) -> list[DailyTaskStepResponse]:
-    raw_steps = _safe_list(value)
+    raw_steps = _safe_json_array(value)
     parsed_steps: list[DailyTaskStepResponse] = []
 
     for item in raw_steps:
@@ -172,7 +205,7 @@ def _parse_task_steps(value: Any) -> list[DailyTaskStepResponse]:
 
 
 def _parse_task_resources(value: Any) -> list[DailyTaskResourceResponse]:
-    raw_resources = _safe_list(value)
+    raw_resources = _safe_json_array(value)
     parsed_resources: list[DailyTaskResourceResponse] = []
 
     for item in raw_resources:
@@ -235,55 +268,67 @@ def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskRespons
 
     rows = conn.execute(query, {"daily_plan_id": daily_plan_id}).mappings().all()
 
-    return [
-        DailyTaskResponse(
-            id=str(row["id"]),
-            daily_plan_id=str(row["daily_plan_id"]),
-            goal_id=str(row["goal_id"]),
-            title=row["title"],
-            objective=row["objective"],
-            description=row["description"],
-            instructions=row["instructions"],
-            why_today=row["why_today"],
-            success_criteria=row["success_criteria"],
-            estimated_minutes=row["estimated_minutes"],
-            detail_level=int(row["detail_level"] or 1),
-            bucket=row["bucket"] or "must",
-            priority=row["priority"] or "medium",
-            order_index=row["order_index"],
-            is_required=bool(row["is_required"]),
-            proof_required=bool(row["proof_required"]),
-            recommended_proof_type=row["recommended_proof_type"],
-            proof_prompt=row["proof_prompt"],
-            task_type=row["task_type"],
-            difficulty=row["difficulty"],
-            tips=[
-                str(item)
-                for item in _safe_list(row["tips"])
-                if str(item).strip()
-            ],
-            technique_cues=[
-                str(item)
-                for item in _safe_list(row["technique_cues"])
-                if str(item).strip()
-            ],
-            common_mistakes=[
-                str(item)
-                for item in _safe_list(row["common_mistakes"])
-                if str(item).strip()
-            ],
-            steps=_parse_task_steps(row["steps"]),
-            resources=_parse_task_resources(row["resources"]),
-            status=DailyTaskStatus(row["status"]),
-            completed_at=row["completed_at"],
-            created_at=row["created_at"],
+    tasks: list[DailyTaskResponse] = []
+
+    for row in rows:
+        proofs = list_task_proofs(str(row["id"]))
+
+        tasks.append(
+            DailyTaskResponse(
+                id=str(row["id"]),
+                daily_plan_id=str(row["daily_plan_id"]),
+                goal_id=str(row["goal_id"]),
+                title=row["title"],
+                objective=row["objective"],
+                description=row["description"],
+                instructions=row["instructions"],
+                why_today=row["why_today"],
+                success_criteria=row["success_criteria"],
+                estimated_minutes=row["estimated_minutes"],
+                detail_level=int(row["detail_level"] or 1),
+                bucket=row["bucket"] or "must",
+                priority=row["priority"] or "medium",
+                order_index=row["order_index"],
+                is_required=bool(row["is_required"]),
+                proof_required=bool(row["proof_required"]),
+                recommended_proof_type=row["recommended_proof_type"],
+                proof_prompt=row["proof_prompt"],
+                task_type=row["task_type"],
+                difficulty=row["difficulty"],
+                tips=[
+                    str(item)
+                    for item in _safe_json_array(row["tips"])
+                    if str(item).strip()
+                ],
+                technique_cues=[
+                    str(item)
+                    for item in _safe_json_array(row["technique_cues"])
+                    if str(item).strip()
+                ],
+                common_mistakes=[
+                    str(item)
+                    for item in _safe_json_array(row["common_mistakes"])
+                    if str(item).strip()
+                ],
+                steps=_parse_task_steps(row["steps"]),
+                resources=_parse_task_resources(row["resources"]),
+                proofs=proofs,
+                status=DailyTaskStatus(row["status"]),
+                completed_at=row["completed_at"],
+                created_at=row["created_at"],
+            )
         )
-        for row in rows
-    ]
+
+    return tasks
 
 
 def _build_daily_plan_response(conn, row) -> DailyPlanResponse:
     tasks = _get_tasks_for_daily_plan(conn, str(row["id"]))
+
+    proofs_required_count = sum(1 for task in tasks if task.proof_required)
+    proofs_accepted_count = sum(
+        1 for task in tasks if task.proof_required and task_has_required_proof(task.id)
+    )
 
     return DailyPlanResponse(
         id=str(row["id"]),
@@ -298,6 +343,8 @@ def _build_daily_plan_response(conn, row) -> DailyPlanResponse:
         total_estimated_minutes=row["total_estimated_minutes"],
         status=DailyPlanStatus(row["status"]),
         tasks=tasks,
+        proofs_required_count=proofs_required_count,
+        proofs_accepted_count=proofs_accepted_count,
         created_at=row["created_at"],
     )
 
@@ -471,8 +518,12 @@ def create_daily_plans_for_goal(
                         "task_type": task.task_type,
                         "difficulty": task.difficulty,
                         "tips": json.dumps(task.tips, ensure_ascii=False),
-                        "technique_cues": json.dumps(task.technique_cues, ensure_ascii=False),
-                        "common_mistakes": json.dumps(task.common_mistakes, ensure_ascii=False),
+                        "technique_cues": json.dumps(
+                            task.technique_cues, ensure_ascii=False
+                        ),
+                        "common_mistakes": json.dumps(
+                            task.common_mistakes, ensure_ascii=False
+                        ),
                         "steps": json.dumps(
                             [step.model_dump() for step in task.steps],
                             ensure_ascii=False,
@@ -541,7 +592,10 @@ def get_goal_daily_plans(goal_id: str) -> list[DailyPlanResponse]:
         return [_build_daily_plan_response(conn, row) for row in rows]
 
 
-def get_daily_plan_by_day_number(goal_id: str, day_number: int) -> DailyPlanResponse | None:
+def get_daily_plan_by_day_number(
+    goal_id: str,
+    day_number: int,
+) -> DailyPlanResponse | None:
     with engine.begin() as conn:
         row = conn.execute(
             text(
@@ -609,6 +663,14 @@ def get_daily_plan_by_id(daily_plan_id: str) -> DailyPlanResponse | None:
         return _build_daily_plan_response(conn, row)
 
 
+def get_active_cycle_daily_plan(goal_id: str) -> DailyPlanResponse | None:
+    active_cycle = get_active_cycle(goal_id)
+    if not active_cycle:
+        return None
+
+    return get_daily_plan_by_id(active_cycle["daily_plan_id"])
+
+
 def _load_goal_available_weekdays(goal_id: str) -> set[int] | None:
     with engine.begin() as connection:
         session = connection.execute(
@@ -670,7 +732,10 @@ def _is_goal_allowed_for_date(goal_id: str, target_date: date) -> bool:
     return target_date.isoweekday() in allowed_weekdays
 
 
-def get_today_plan(goal_id: str, today_date: date | None = None) -> DailyPlanResponse | None:
+def get_today_plan(
+    goal_id: str,
+    today_date: date | None = None,
+) -> DailyPlanResponse | None:
     today_date = today_date or date.today()
 
     with engine.begin() as conn:
@@ -745,36 +810,15 @@ def get_next_actionable_daily_plan(
 ) -> DailyPlanResponse | None:
     reference_date = reference_date or date.today()
 
+    active_cycle_plan = get_active_cycle_daily_plan(goal_id)
+    if active_cycle_plan:
+        return active_cycle_plan
+
+    assigned_cycle = assign_first_cycle_for_goal(goal_id)
+    if assigned_cycle:
+        return get_daily_plan_by_id(assigned_cycle["daily_plan_id"])
+
     with engine.begin() as conn:
-        in_progress_row = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    day_number,
-                    planned_date,
-                    focus,
-                    summary,
-                    headline,
-                    focus_message,
-                    main_task_title,
-                    total_estimated_minutes,
-                    status,
-                    created_at
-                FROM daily_plans
-                WHERE goal_id = :goal_id
-                  AND status = 'in_progress'
-                ORDER BY day_number ASC
-                LIMIT 1
-                """
-            ),
-            {"goal_id": goal_id},
-        ).mappings().first()
-
-        if in_progress_row:
-            return _build_daily_plan_response(conn, in_progress_row)
-
         pending_rows = conn.execute(
             text(
                 """
@@ -901,12 +945,18 @@ def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | Non
         return _build_daily_plan_response(conn, row)
 
 
-def update_daily_task_status(task_id: str, status: DailyTaskStatus) -> DailyPlanResponse | None:
+def update_daily_task_status(
+    task_id: str,
+    status: DailyTaskStatus,
+) -> DailyPlanResponse | None:
     with engine.begin() as conn:
         task_row = conn.execute(
             text(
                 """
-                SELECT id, daily_plan_id
+                SELECT
+                    id,
+                    daily_plan_id,
+                    proof_required
                 FROM daily_tasks
                 WHERE id = :task_id
                 LIMIT 1
@@ -917,6 +967,10 @@ def update_daily_task_status(task_id: str, status: DailyTaskStatus) -> DailyPlan
 
         if not task_row:
             return None
+
+        if status == DailyTaskStatus.done and bool(task_row["proof_required"]):
+            if not task_has_required_proof(task_id):
+                raise ValueError("required_proof_missing_for_task")
 
         completed_at = datetime.now(timezone.utc) if status == DailyTaskStatus.done else None
 
@@ -937,7 +991,21 @@ def update_daily_task_status(task_id: str, status: DailyTaskStatus) -> DailyPlan
             },
         )
 
-    return recalculate_daily_plan_status(str(task_row["daily_plan_id"]))
+    updated_plan = recalculate_daily_plan_status(str(task_row["daily_plan_id"]))
+    if not updated_plan:
+        return None
+
+    if updated_plan.status == DailyPlanStatus.done:
+        complete_cycle_for_daily_plan(updated_plan.id)
+        unlock_next_cycle_after_completion(
+            goal_id=updated_plan.goal_id,
+            completed_daily_plan_id=updated_plan.id,
+        )
+        refreshed_active = get_active_cycle_daily_plan(updated_plan.goal_id)
+        if refreshed_active:
+            return refreshed_active
+
+    return updated_plan
 
 
 def update_daily_plan_status(
@@ -945,6 +1013,10 @@ def update_daily_plan_status(
     status: DailyPlanStatus,
 ) -> DailyPlanResponse | None:
     with engine.begin() as conn:
+        if status == DailyPlanStatus.done:
+            if not daily_plan_all_required_proofs_present(daily_plan_id):
+                raise ValueError("required_proofs_missing_for_daily_plan")
+
         conn.execute(
             text(
                 """
@@ -1013,7 +1085,19 @@ def update_daily_plan_status(
         if not row:
             return None
 
-        return _build_daily_plan_response(conn, row)
+        updated_plan = _build_daily_plan_response(conn, row)
+
+    if updated_plan.status == DailyPlanStatus.done:
+        complete_cycle_for_daily_plan(updated_plan.id)
+        unlock_next_cycle_after_completion(
+            goal_id=updated_plan.goal_id,
+            completed_daily_plan_id=updated_plan.id,
+        )
+        refreshed_active = get_active_cycle_daily_plan(updated_plan.goal_id)
+        if refreshed_active:
+            return refreshed_active
+
+    return updated_plan
 
 
 def _daily_plan_needs_detailing(plan: DailyPlanResponse) -> bool:
@@ -1362,12 +1446,37 @@ def _update_detailed_daily_plan(
                     "task_type": task.get("task_type"),
                     "difficulty": task.get("difficulty"),
                     "tips": json.dumps(task.get("tips", []), ensure_ascii=False),
-                    "technique_cues": json.dumps(task.get("technique_cues", []), ensure_ascii=False),
-                    "common_mistakes": json.dumps(task.get("common_mistakes", []), ensure_ascii=False),
+                    "technique_cues": json.dumps(
+                        task.get("technique_cues", []), ensure_ascii=False
+                    ),
+                    "common_mistakes": json.dumps(
+                        task.get("common_mistakes", []), ensure_ascii=False
+                    ),
                     "steps": json.dumps(task.get("steps", []), ensure_ascii=False),
                     "resources": json.dumps(task.get("resources", []), ensure_ascii=False),
                 },
             )
+
+
+async def _safe_enrich_day(
+    detailing_service: DailyTaskDetailingService,
+    context: GoalGenerationContext,
+    day_payload: dict[str, Any],
+    response_language: str,
+) -> dict[str, Any] | None:
+    for _ in range(2):
+        try:
+            result = await detailing_service.enrich_single_day(
+                context=context,
+                day=day_payload,
+                response_language=response_language,
+            )
+            if result and isinstance(result, dict) and result.get("tasks"):
+                return result
+        except Exception:
+            continue
+
+    return None
 
 
 async def enrich_today_plan_if_needed(
@@ -1381,20 +1490,34 @@ async def enrich_today_plan_if_needed(
     if not _daily_plan_needs_detailing(plan):
         return plan
 
-    context = _load_goal_generation_context(goal_id)
-    response_language = _infer_response_language(context)
-    day_payload = _build_day_payload_from_plan(plan)
+    if plan.status == DailyPlanStatus.done:
+        return plan
 
-    detailing_service = DailyTaskDetailingService()
-    detailed_day = await detailing_service.enrich_single_day(
-        context=context,
-        day=day_payload,
-        response_language=response_language,
-    )
+    try:
+        context = _load_goal_generation_context(goal_id)
+        response_language = _infer_response_language(context)
+        day_payload = _build_day_payload_from_plan(plan)
+
+        detailing_service = DailyTaskDetailingService()
+        detailed_day = await _safe_enrich_day(
+            detailing_service=detailing_service,
+            context=context,
+            day_payload=day_payload,
+            response_language=response_language,
+        )
+    except Exception:
+        return plan
+
+    if not detailed_day or not isinstance(detailed_day, dict):
+        return plan
+
+    if not detailed_day.get("tasks"):
+        return plan
 
     _update_detailed_daily_plan(plan.id, detailed_day)
 
-    return get_today_plan(goal_id, today_date=today_date)
+    refreshed_plan = get_daily_plan_by_id(plan.id)
+    return refreshed_plan or plan
 
 
 async def enrich_next_actionable_daily_plan_if_needed(
@@ -1408,17 +1531,28 @@ async def enrich_next_actionable_daily_plan_if_needed(
     if not _daily_plan_needs_detailing(plan):
         return plan
 
-    context = _load_goal_generation_context(goal_id)
-    response_language = _infer_response_language(context)
-    day_payload = _build_day_payload_from_plan(plan)
+    try:
+        context = _load_goal_generation_context(goal_id)
+        response_language = _infer_response_language(context)
+        day_payload = _build_day_payload_from_plan(plan)
 
-    detailing_service = DailyTaskDetailingService()
-    detailed_day = await detailing_service.enrich_single_day(
-        context=context,
-        day=day_payload,
-        response_language=response_language,
-    )
+        detailing_service = DailyTaskDetailingService()
+        detailed_day = await _safe_enrich_day(
+            detailing_service=detailing_service,
+            context=context,
+            day_payload=day_payload,
+            response_language=response_language,
+        )
+    except Exception:
+        return plan
+
+    if not detailed_day or not isinstance(detailed_day, dict):
+        return plan
+
+    if not detailed_day.get("tasks"):
+        return plan
 
     _update_detailed_daily_plan(plan.id, detailed_day)
 
-    return get_daily_plan_by_id(plan.id)
+    refreshed_plan = get_daily_plan_by_id(plan.id)
+    return refreshed_plan or plan
