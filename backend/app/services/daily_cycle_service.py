@@ -142,6 +142,7 @@ def _map_cycle_row(row) -> dict[str, Any]:
         "daily_plan_id": str(row["daily_plan_id"]),
         "cycle_index": int(row["cycle_index"]),
         "status": row["status"],
+        "available_from": row["available_from"],
         "opened_at": row["opened_at"],
         "due_at": row["due_at"],
         "completed_at": row["completed_at"],
@@ -231,6 +232,66 @@ def _get_next_cycle_index(conn, goal_id: str) -> int:
     ).mappings().one()
 
     return int(row["max_cycle_index"] or 0) + 1
+
+
+def _get_active_cycle_row(conn, goal_id: str):
+    return conn.execute(
+        text(
+            """
+            SELECT
+                id,
+                goal_id,
+                daily_plan_id,
+                cycle_index,
+                status,
+                available_from,
+                opened_at,
+                due_at,
+                completed_at,
+                created_at,
+                updated_at
+            FROM daily_plan_cycles
+            WHERE goal_id = :goal_id
+              AND status = :status
+            ORDER BY cycle_index ASC
+            LIMIT 1
+            """
+        ),
+        {
+            "goal_id": goal_id,
+            "status": ACTIVE_CYCLE_STATUS,
+        },
+    ).mappings().first()
+
+
+def _get_cycle_row_by_daily_plan_id(conn, goal_id: str, daily_plan_id: str):
+    return conn.execute(
+        text(
+            """
+            SELECT
+                id,
+                goal_id,
+                daily_plan_id,
+                cycle_index,
+                status,
+                available_from,
+                opened_at,
+                due_at,
+                completed_at,
+                created_at,
+                updated_at
+            FROM daily_plan_cycles
+            WHERE goal_id = :goal_id
+              AND daily_plan_id = :daily_plan_id
+            ORDER BY cycle_index ASC
+            LIMIT 1
+            """
+        ),
+        {
+            "goal_id": goal_id,
+            "daily_plan_id": daily_plan_id,
+        },
+    ).mappings().first()
 
 
 def _load_goal_available_weekdays(conn, goal_id: str) -> set[int] | None:
@@ -345,105 +406,86 @@ def _calculate_next_cycle_due_at(
     return _end_of_day_utc(due_date)
 
 
+def _create_cycle_for_daily_plan(
+    *,
+    conn,
+    goal_id: str,
+    daily_plan_id: str,
+    due_at: datetime,
+) -> dict[str, Any]:
+    cycle_index = _get_next_cycle_index(conn, goal_id)
+    now_utc = datetime.now(timezone.utc)
+
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO daily_plan_cycles (
+                goal_id,
+                daily_plan_id,
+                cycle_index,
+                status,
+                available_from,
+                opened_at,
+                due_at,
+                completed_at
+            )
+            VALUES (
+                :goal_id,
+                :daily_plan_id,
+                :cycle_index,
+                :status,
+                :available_from,
+                :opened_at,
+                :due_at,
+                NULL
+            )
+            RETURNING
+                id,
+                goal_id,
+                daily_plan_id,
+                cycle_index,
+                status,
+                available_from,
+                opened_at,
+                due_at,
+                completed_at,
+                created_at,
+                updated_at
+            """
+        ),
+        {
+            "goal_id": goal_id,
+            "daily_plan_id": daily_plan_id,
+            "cycle_index": cycle_index,
+            "status": ACTIVE_CYCLE_STATUS,
+            "available_from": now_utc,
+            "opened_at": now_utc,
+            "due_at": due_at,
+        },
+    ).mappings().one()
+
+    return _map_cycle_row(row)
+
+
 def get_active_cycle(goal_id: str) -> dict[str, Any] | None:
     with engine.begin() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE goal_id = :goal_id
-                  AND status = :status
-                ORDER BY cycle_index ASC
-                LIMIT 1
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "status": ACTIVE_CYCLE_STATUS,
-            },
-        ).mappings().first()
-
+        row = _get_active_cycle_row(conn, goal_id)
         if not row:
             return None
-
         return _map_cycle_row(row)
 
 
 def get_cycle_by_daily_plan_id(goal_id: str, daily_plan_id: str) -> dict[str, Any] | None:
     with engine.begin() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE goal_id = :goal_id
-                  AND daily_plan_id = :daily_plan_id
-                ORDER BY cycle_index ASC
-                LIMIT 1
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "daily_plan_id": daily_plan_id,
-            },
-        ).mappings().first()
-
+        row = _get_cycle_row_by_daily_plan_id(conn, goal_id, daily_plan_id)
         if not row:
             return None
-
         return _map_cycle_row(row)
 
 
 def assign_first_cycle_for_goal(goal_id: str) -> dict[str, Any] | None:
     with engine.begin() as conn:
-        existing_active = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE goal_id = :goal_id
-                  AND status = :status
-                ORDER BY cycle_index ASC
-                LIMIT 1
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "status": ACTIVE_CYCLE_STATUS,
-            },
-        ).mappings().first()
-
+        existing_active = _get_active_cycle_row(conn, goal_id)
         if existing_active:
             return _map_cycle_row(existing_active)
 
@@ -451,29 +493,12 @@ def assign_first_cycle_for_goal(goal_id: str) -> dict[str, Any] | None:
         if not first_plan:
             return None
 
-        existing_for_plan = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE daily_plan_id = :daily_plan_id
-                LIMIT 1
-                """
-            ),
-            {"daily_plan_id": str(first_plan["id"])},
-        ).mappings().first()
-
-        if existing_for_plan:
+        existing_for_plan = _get_cycle_row_by_daily_plan_id(
+            conn,
+            goal_id,
+            str(first_plan["id"]),
+        )
+        if existing_for_plan and existing_for_plan["status"] == ACTIVE_CYCLE_STATUS:
             return _map_cycle_row(existing_for_plan)
 
         due_at = _calculate_initial_cycle_due_at(
@@ -481,54 +506,13 @@ def assign_first_cycle_for_goal(goal_id: str) -> dict[str, Any] | None:
             goal_id=goal_id,
             daily_plan_row=first_plan,
         )
-        cycle_index = _get_next_cycle_index(conn, goal_id)
-        now_utc = datetime.now(timezone.utc)
 
-        row = conn.execute(
-            text(
-                """
-                INSERT INTO daily_plan_cycles (
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at
-                )
-                VALUES (
-                    :goal_id,
-                    :daily_plan_id,
-                    :cycle_index,
-                    :status,
-                    :opened_at,
-                    :due_at,
-                    NULL
-                )
-                RETURNING
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "daily_plan_id": str(first_plan["id"]),
-                "cycle_index": cycle_index,
-                "status": ACTIVE_CYCLE_STATUS,
-                "opened_at": now_utc,
-                "due_at": due_at,
-            },
-        ).mappings().one()
-
-        return _map_cycle_row(row)
+        return _create_cycle_for_daily_plan(
+            conn=conn,
+            goal_id=goal_id,
+            daily_plan_id=str(first_plan["id"]),
+            due_at=due_at,
+        )
 
 
 def complete_cycle_for_daily_plan(daily_plan_id: str) -> dict[str, Any] | None:
@@ -542,6 +526,7 @@ def complete_cycle_for_daily_plan(daily_plan_id: str) -> dict[str, Any] | None:
                     daily_plan_id,
                     cycle_index,
                     status,
+                    available_from,
                     opened_at,
                     due_at,
                     completed_at,
@@ -580,6 +565,7 @@ def complete_cycle_for_daily_plan(daily_plan_id: str) -> dict[str, Any] | None:
                     daily_plan_id,
                     cycle_index,
                     status,
+                    available_from,
                     opened_at,
                     due_at,
                     completed_at,
@@ -602,33 +588,7 @@ def unlock_next_cycle_after_completion(
     completed_daily_plan_id: str,
 ) -> dict[str, Any] | None:
     with engine.begin() as conn:
-        existing_active = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE goal_id = :goal_id
-                  AND status = :status
-                ORDER BY cycle_index ASC
-                LIMIT 1
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "status": ACTIVE_CYCLE_STATUS,
-            },
-        ).mappings().first()
-
+        existing_active = _get_active_cycle_row(conn, goal_id)
         if existing_active:
             return _map_cycle_row(existing_active)
 
@@ -644,29 +604,12 @@ def unlock_next_cycle_after_completion(
         if not next_plan:
             return None
 
-        existing_for_next = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE daily_plan_id = :daily_plan_id
-                LIMIT 1
-                """
-            ),
-            {"daily_plan_id": str(next_plan["id"])},
-        ).mappings().first()
-
-        if existing_for_next:
+        existing_for_next = _get_cycle_row_by_daily_plan_id(
+            conn,
+            goal_id,
+            str(next_plan["id"]),
+        )
+        if existing_for_next and existing_for_next["status"] == ACTIVE_CYCLE_STATUS:
             return _map_cycle_row(existing_for_next)
 
         reference_date = datetime.now(timezone.utc).date()
@@ -675,54 +618,13 @@ def unlock_next_cycle_after_completion(
             goal_id=goal_id,
             from_date=reference_date,
         )
-        cycle_index = _get_next_cycle_index(conn, goal_id)
-        now_utc = datetime.now(timezone.utc)
 
-        row = conn.execute(
-            text(
-                """
-                INSERT INTO daily_plan_cycles (
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at
-                )
-                VALUES (
-                    :goal_id,
-                    :daily_plan_id,
-                    :cycle_index,
-                    :status,
-                    :opened_at,
-                    :due_at,
-                    NULL
-                )
-                RETURNING
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "daily_plan_id": str(next_plan["id"]),
-                "cycle_index": cycle_index,
-                "status": ACTIVE_CYCLE_STATUS,
-                "opened_at": now_utc,
-                "due_at": due_at,
-            },
-        ).mappings().one()
-
-        return _map_cycle_row(row)
+        return _create_cycle_for_daily_plan(
+            conn=conn,
+            goal_id=goal_id,
+            daily_plan_id=str(next_plan["id"]),
+            due_at=due_at,
+        )
 
 
 def unlock_next_cycle_after_missed(
@@ -730,33 +632,7 @@ def unlock_next_cycle_after_missed(
     missed_daily_plan_id: str,
 ) -> dict[str, Any] | None:
     with engine.begin() as conn:
-        existing_active = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE goal_id = :goal_id
-                  AND status = :status
-                ORDER BY cycle_index ASC
-                LIMIT 1
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "status": ACTIVE_CYCLE_STATUS,
-            },
-        ).mappings().first()
-
+        existing_active = _get_active_cycle_row(conn, goal_id)
         if existing_active:
             return _map_cycle_row(existing_active)
 
@@ -772,29 +648,12 @@ def unlock_next_cycle_after_missed(
         if not next_plan:
             return None
 
-        existing_for_next = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                FROM daily_plan_cycles
-                WHERE daily_plan_id = :daily_plan_id
-                LIMIT 1
-                """
-            ),
-            {"daily_plan_id": str(next_plan["id"])},
-        ).mappings().first()
-
-        if existing_for_next:
+        existing_for_next = _get_cycle_row_by_daily_plan_id(
+            conn,
+            goal_id,
+            str(next_plan["id"]),
+        )
+        if existing_for_next and existing_for_next["status"] == ACTIVE_CYCLE_STATUS:
             return _map_cycle_row(existing_for_next)
 
         reference_date = datetime.now(timezone.utc).date()
@@ -803,54 +662,13 @@ def unlock_next_cycle_after_missed(
             goal_id=goal_id,
             from_date=reference_date,
         )
-        cycle_index = _get_next_cycle_index(conn, goal_id)
-        now_utc = datetime.now(timezone.utc)
 
-        row = conn.execute(
-            text(
-                """
-                INSERT INTO daily_plan_cycles (
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at
-                )
-                VALUES (
-                    :goal_id,
-                    :daily_plan_id,
-                    :cycle_index,
-                    :status,
-                    :opened_at,
-                    :due_at,
-                    NULL
-                )
-                RETURNING
-                    id,
-                    goal_id,
-                    daily_plan_id,
-                    cycle_index,
-                    status,
-                    opened_at,
-                    due_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                """
-            ),
-            {
-                "goal_id": goal_id,
-                "daily_plan_id": str(next_plan["id"]),
-                "cycle_index": cycle_index,
-                "status": ACTIVE_CYCLE_STATUS,
-                "opened_at": now_utc,
-                "due_at": due_at,
-            },
-        ).mappings().one()
-
-        return _map_cycle_row(row)
+        return _create_cycle_for_daily_plan(
+            conn=conn,
+            goal_id=goal_id,
+            daily_plan_id=str(next_plan["id"]),
+            due_at=due_at,
+        )
 
 
 def mark_overdue_cycles(now: datetime | None = None) -> list[dict[str, Any]]:
@@ -866,6 +684,7 @@ def mark_overdue_cycles(now: datetime | None = None) -> list[dict[str, Any]]:
                     daily_plan_id,
                     cycle_index,
                     status,
+                    available_from,
                     opened_at,
                     due_at,
                     completed_at,
@@ -896,6 +715,7 @@ def mark_overdue_cycles(now: datetime | None = None) -> list[dict[str, Any]]:
                         daily_plan_id,
                         cycle_index,
                         status,
+                        available_from,
                         opened_at,
                         due_at,
                         completed_at,
@@ -929,6 +749,7 @@ def mark_overdue_cycles(now: datetime | None = None) -> list[dict[str, Any]]:
                         daily_plan_id,
                         cycle_index,
                         status,
+                        available_from,
                         opened_at,
                         due_at,
                         completed_at,
