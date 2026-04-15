@@ -925,17 +925,12 @@ Examples:
                 days_of_week = task.cadence_config.get("days_of_week")
                 if not isinstance(days_of_week, list) or not days_of_week:
                     raise AIResponseValidationError("ai_task_days_of_week_invalid")
-                if not all(
-                    isinstance(day, int) and 1 <= day <= 7 for day in days_of_week
-                ):
-                    raise AIResponseValidationError(
-                        "ai_task_days_of_week_out_of_range"
-                    )
+                if not all(isinstance(day, int) and 1 <= day <= 7 for day in days_of_week):
+                    raise AIResponseValidationError("ai_task_days_of_week_out_of_range")
 
             proof_prompt = getattr(task, "proof_prompt", None)
-            if task.proof_required:
-                if not proof_prompt or not str(proof_prompt).strip():
-                    raise AIResponseValidationError("ai_task_proof_prompt_empty")
+            if task.proof_required and (not proof_prompt or not str(proof_prompt).strip()):
+                raise AIResponseValidationError("ai_task_proof_prompt_empty")
 
     def _map_to_plan_payload(
         self,
@@ -1165,14 +1160,9 @@ Strict requirements:
   - photo
   - screenshot
   - file
-- Every task with proof_required=true must contain proof_prompt
+- Every task must contain proof_prompt
 - Proofs must be easy but valid
 - Do not require full process recording
-- For reading tasks, page progress photo is enough
-- For workout tasks, one contextual photo or short result description is enough
-- For coding tasks, screenshot of code/editor is enough
-- For writing tasks, screenshot or pasted result is enough
-- For planning/reflection, short text summary is enough
 - If cadence_type is daily -> cadence_config must be {{}}
 - If cadence_type is weekly -> cadence_config must include integer times_per_week
 - If cadence_type is specific_weekdays -> cadence_config must include days_of_week with integers from 1 to 7
