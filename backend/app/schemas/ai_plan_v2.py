@@ -1,22 +1,27 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, Field
 
 
 class AIPlanStepV2(BaseModel):
-    title: str = Field(min_length=1)
-    description: str = Field(min_length=1)
+    title: str
+    description: str
 
 
 class AIPlanTaskV2(BaseModel):
-    title: str = Field(min_length=1)
-    description: str = Field(min_length=1)
-    cadence_type: str = Field(min_length=1)
+    title: str
+    description: str
+
+    cadence_type: str
     cadence_config: dict = Field(default_factory=dict)
-    proof_type: str = Field(min_length=1)
+
+    proof_type: str
     proof_required: bool = True
+    proof_prompt: str | None = None
 
 
 class AIPlanResponseV2(BaseModel):
-    summary: str = Field(min_length=1)
-    duration_weeks: int = Field(ge=1)
-    steps: list[AIPlanStepV2] = Field(min_length=4, max_length=6)
-    tasks: list[AIPlanTaskV2] = Field(min_length=3, max_length=7)
+    summary: str
+    duration_weeks: int
+    steps: list[AIPlanStepV2] = Field(default_factory=list)
+    tasks: list[AIPlanTaskV2] = Field(default_factory=list)
