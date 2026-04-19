@@ -12,8 +12,8 @@ from app.schemas.proof import (
     ReviewProofRequest,
 )
 
-# 🔥 NEW
-from app.services.ai_proof_review_service import run_ai_proof_review
+# 🔥 AI review
+from app.services.ai_proof_review_service import run_ai_proof_review_sync
 
 
 ACCEPTED_LIKE_PROOF_STATUSES = {
@@ -47,7 +47,7 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
         task_row = conn.execute(
             text(
                 """
-                SELECT id, goal_id, daily_plan_id
+                SELECT id, goal_id, daily_plan_id, title, description
                 FROM daily_tasks
                 WHERE id = :task_id
                 LIMIT 1
@@ -111,12 +111,47 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
 
     proof = _map_row_to_proof_response(row)
 
-    # 🔥 AI REVIEW (ключевая часть)
+    # 🔥 AI REVIEW (фикс)
     try:
-        run_ai_proof_review(proof.proof_id)
-    except Exception:
-        # не ломаем UX если AI упал
-        pass
+        review_status, review_message = run_ai_proof_review_sync(
+            task_title=task_row.get("title"),
+            task_description=task_row.get("description"),
+            proof_text=proof.text,
+            proof_caption=proof.caption,
+        )
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE proofs
+                    SET
+                        status = :status,
+                        review_message = :review_message,
+                        reviewed_at = :reviewed_at,
+                        updated_at = NOW()
+                    WHERE id = :proof_id
+                    """
+                ),
+                {
+                    "proof_id": proof.proof_id,
+                    "status": review_status.value,
+                    "review_message": review_message,
+                    "reviewed_at": datetime.now(timezone.utc),
+                },
+            )
+
+        # обновляем proof перед возвратом
+        with engine.begin() as conn:
+            updated_row = conn.execute(
+                text("SELECT * FROM proofs WHERE id = :proof_id"),
+                {"proof_id": proof.proof_id},
+            ).mappings().one()
+
+        return _map_row_to_proof_response(updated_row)
+
+    except Exception as e:
+        print(f"❌ AI PROOF REVIEW FAILED: {e}")
 
     return proof
 
@@ -184,7 +219,6 @@ def review_proof(proof_id: str, payload: ReviewProofRequest) -> ProofResponse | 
         return _map_row_to_proof_response(row)
 
 
-# 🔥 ВАЖНО: теперь только accepted считается валидным
 def task_has_required_proof(task_id: str) -> bool:
     return task_has_accepted_required_proof(task_id)
 
