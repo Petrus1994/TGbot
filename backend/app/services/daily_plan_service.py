@@ -31,75 +31,6 @@ from app.services.proof_service import (
     task_has_required_proof,
 )
 
-# =========================================================
-# 🔥 EXECUTION INTELLIGENCE LAYER (SAFE ADDITION)
-# =========================================================
-
-def _calculate_day_difficulty(plan: DailyPlanResponse) -> str:
-    total = plan.total_estimated_minutes or 0
-
-    if total <= 30:
-        return "easy"
-    if total <= 90:
-        return "medium"
-    return "hard"
-
-
-def _prioritize_tasks(tasks: list[DailyTaskResponse]) -> list[DailyTaskResponse]:
-    def score(task: DailyTaskResponse):
-        s = 0
-
-        if task.is_required:
-            s += 10
-
-        if task.priority == "high":
-            s += 5
-
-        if task.priority == "low":
-            s -= 2
-
-        if task.estimated_minutes:
-            s -= min(task.estimated_minutes / 30, 3)
-
-        if task.proof_required:
-            s += 1
-
-        return s
-
-    return sorted(tasks, key=score, reverse=True)
-
-
-def _inject_minimum_execution_fields(task: DailyTaskResponse) -> None:
-    """
-    Гарантируем что таска всегда исполнима
-    """
-
-    if not task.why_today:
-        task.why_today = "Это действие напрямую двигает тебя к цели."
-
-    if not task.success_criteria:
-        task.success_criteria = "Задача завершена полностью."
-
-    if task.estimated_minutes is None:
-        task.estimated_minutes = 15
-
-
-def _ensure_tasks_are_executable(tasks: list[DailyTaskResponse]) -> list[DailyTaskResponse]:
-    for t in tasks:
-        _inject_minimum_execution_fields(t)
-    return tasks
-
-
-def _build_focus_message(plan: DailyPlanResponse) -> str:
-    if not plan.tasks:
-        return "Сделай хотя бы одно действие по цели."
-
-    main = plan.tasks[0]
-    return f"Главный фокус: {main.title}"
-
-
-def _build_headline(plan: DailyPlanResponse) -> str:
-    return f"День {plan.day_number}: {plan.focus or 'Execution'}"
 
 def _parse_date(value: Any) -> date | None:
     if value is None:
@@ -392,36 +323,6 @@ def _get_tasks_for_daily_plan(conn, daily_plan_id: str) -> list[DailyTaskRespons
 
 
 def _build_daily_plan_response(conn, row) -> DailyPlanResponse:
-    tasks = _get_tasks_for_daily_plan(conn, str(row["id"]))
-
-    # 🔥 NEW: приоритизация
-    tasks = _prioritize_tasks(tasks)
-
-    # 🔥 NEW: гарантия исполнимости
-    tasks = _ensure_tasks_are_executable(tasks)
-
-    proofs_required_count = sum(1 for task in tasks if task.proof_required)
-    proofs_accepted_count = sum(
-        1 for task in tasks if task.proof_required and task_has_required_proof(task.id)
-    )
-
-    return DailyPlanResponse(
-        id=str(row["id"]),
-        goal_id=str(row["goal_id"]),
-        day_number=row["day_number"] or 1,
-        planned_date=_parse_date(row["planned_date"]),
-        focus=row["focus"],
-        summary=row["summary"],
-        headline=row["headline"],
-        focus_message=row["focus_message"],
-        main_task_title=row["main_task_title"],
-        total_estimated_minutes=row["total_estimated_minutes"],
-        status=DailyPlanStatus(row["status"]),
-        tasks=tasks,
-        proofs_required_count=proofs_required_count,
-        proofs_accepted_count=proofs_accepted_count,
-        created_at=row["created_at"],
-    )
     tasks = _get_tasks_for_daily_plan(conn, str(row["id"]))
 
     proofs_required_count = sum(1 for task in tasks if task.proof_required)
@@ -903,6 +804,71 @@ def get_today_plan(
         return _build_daily_plan_response(conn, fallback_row)
 
 
+def get_next_actionable_daily_plan(
+    goal_id: str,
+    reference_date: date | None = None,
+) -> DailyPlanResponse | None:
+    reference_date = reference_date or date.today()
+
+    active_cycle_plan = get_active_cycle_daily_plan(goal_id)
+    if active_cycle_plan:
+        return active_cycle_plan
+
+    assigned_cycle = assign_first_cycle_for_goal(goal_id)
+    if assigned_cycle:
+        return get_daily_plan_by_id(assigned_cycle["daily_plan_id"])
+
+    with engine.begin() as conn:
+        pending_rows = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    goal_id,
+                    day_number,
+                    planned_date,
+                    focus,
+                    summary,
+                    headline,
+                    focus_message,
+                    main_task_title,
+                    total_estimated_minutes,
+                    status,
+                    created_at
+                FROM daily_plans
+                WHERE goal_id = :goal_id
+                  AND status = 'pending'
+                ORDER BY day_number ASC
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().all()
+
+        if not pending_rows:
+            return None
+
+        started_row = conn.execute(
+            text(
+                """
+                SELECT id
+                FROM daily_plans
+                WHERE goal_id = :goal_id
+                  AND status IN ('done', 'skipped', 'in_progress')
+                LIMIT 1
+                """
+            ),
+            {"goal_id": goal_id},
+        ).mappings().first()
+
+        if not started_row:
+            return _build_daily_plan_response(conn, pending_rows[0])
+
+        if not _is_goal_allowed_for_date(goal_id, reference_date):
+            return None
+
+        return _build_daily_plan_response(conn, pending_rows[0])
+
+
 def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | None:
     with engine.begin() as conn:
         stats_row = conn.execute(
@@ -977,70 +943,6 @@ def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | Non
             return None
 
         return _build_daily_plan_response(conn, row)
-
-def get_next_actionable_daily_plan(
-    goal_id: str,
-    reference_date: date | None = None,
-) -> DailyPlanResponse | None:
-    reference_date = reference_date or date.today()
-
-    active_cycle_plan = get_active_cycle_daily_plan(goal_id)
-    if active_cycle_plan:
-        return active_cycle_plan
-
-    assigned_cycle = assign_first_cycle_for_goal(goal_id)
-    if assigned_cycle:
-        return get_daily_plan_by_id(assigned_cycle["daily_plan_id"])
-
-    with engine.begin() as conn:
-        pending_rows = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    day_number,
-                    planned_date,
-                    focus,
-                    summary,
-                    headline,
-                    focus_message,
-                    main_task_title,
-                    total_estimated_minutes,
-                    status,
-                    created_at
-                FROM daily_plans
-                WHERE goal_id = :goal_id
-                  AND status = 'pending'
-                ORDER BY day_number ASC
-                """
-            ),
-            {"goal_id": goal_id},
-        ).mappings().all()
-
-        if not pending_rows:
-            return None
-
-        started_row = conn.execute(
-            text(
-                """
-                SELECT id
-                FROM daily_plans
-                WHERE goal_id = :goal_id
-                  AND status IN ('done', 'skipped', 'in_progress')
-                LIMIT 1
-                """
-            ),
-            {"goal_id": goal_id},
-        ).mappings().first()
-
-        if not started_row:
-            return _build_daily_plan_response(conn, pending_rows[0])
-
-        if not _is_goal_allowed_for_date(goal_id, reference_date):
-            return None
-
-        return _build_daily_plan_response(conn, pending_rows[0])
 
 
 def update_daily_task_status(
@@ -1383,6 +1285,7 @@ def _load_goal_generation_context(goal_id: str) -> GoalGenerationContext:
                 profiling_summary.get("main_obstacles"),
                 profiling_summary.get("risk_factors"),
                 answers.get("main_obstacles"),
+                answers.get("obstacles"),
             )
         )
         daily_routine = _normalize_text_field(
@@ -1396,6 +1299,7 @@ def _load_goal_generation_context(goal_id: str) -> GoalGenerationContext:
                 profiling_summary.get("planning_notes"),
                 profiling_summary.get("environment"),
                 answers.get("planning_notes"),
+                answers.get("environment"),
             )
         )
         plan_confidence = _normalize_text_field(
@@ -1573,7 +1477,8 @@ async def _safe_enrich_day(
             )
             if result and isinstance(result, dict) and result.get("tasks"):
                 return result
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ _safe_enrich_day attempt failed: {e}")
             continue
 
     return None
@@ -1583,101 +1488,87 @@ async def enrich_today_plan_if_needed(
     goal_id: str,
     today_date: date | None = None,
 ) -> DailyPlanResponse | None:
-
     plan = get_today_plan(goal_id, today_date=today_date)
     if not plan:
         return None
 
+    if not _daily_plan_needs_detailing(plan):
+        return plan
+
     if plan.status == DailyPlanStatus.done:
         return plan
 
-    # 🔥 PRIORITY LAYER
-    plan.tasks = _prioritize_tasks(plan.tasks)
-    plan.tasks = _ensure_tasks_are_executable(plan.tasks)
+    try:
+        context = _load_goal_generation_context(goal_id)
+        response_language = _infer_response_language(context)
+        day_payload = _build_day_payload_from_plan(plan)
 
-    # 🤖 DETAILING (как было)
-    if _daily_plan_needs_detailing(plan):
-        try:
-            context = _load_goal_generation_context(goal_id)
-            response_language = _infer_response_language(context)
-            day_payload = _build_day_payload_from_plan(plan)
+        detailing_service = DailyTaskDetailingService()
+        detailed_day = await _safe_enrich_day(
+            detailing_service=detailing_service,
+            context=context,
+            day_payload=day_payload,
+            response_language=response_language,
+        )
+    except Exception as e:
+        print(f"⚠️ enrich_today_plan_if_needed failed: {e}")
+        return plan
 
-            detailing_service = DailyTaskDetailingService()
+    if not detailed_day or not isinstance(detailed_day, dict):
+        return plan
 
-            detailed_day = await _safe_enrich_day(
-                detailing_service=detailing_service,
-                context=context,
-                day_payload=day_payload,
-                response_language=response_language,
-            )
+    if not detailed_day.get("tasks"):
+        return plan
 
-            if detailed_day and isinstance(detailed_day, dict) and detailed_day.get("tasks"):
-                _update_detailed_daily_plan(plan.id, detailed_day)
-
-                refreshed_plan = get_daily_plan_by_id(plan.id)
-                if refreshed_plan:
-                    plan = refreshed_plan
-
-        except Exception as e:
-            print(f"⚠️ enrich_today_plan_if_needed failed: {e}")
-
-    # 🔥 COACH UX LAYER
-    if not plan.headline:
-        plan.headline = _build_headline(plan)
-
-    if not plan.focus_message:
-        plan.focus_message = _build_focus_message(plan)
-
-    return plan
+    try:
+        _update_detailed_daily_plan(plan.id, detailed_day)
+        refreshed_plan = get_daily_plan_by_id(plan.id)
+        return refreshed_plan or plan
+    except Exception as e:
+        print(f"⚠️ enrich_today_plan_if_needed update failed: {e}")
+        return plan
 
 
-async def enrich_today_plan_if_needed(
+async def enrich_next_actionable_daily_plan_if_needed(
     goal_id: str,
-    today_date: date | None = None,
+    reference_date: date | None = None,
 ) -> DailyPlanResponse | None:
-
-    plan = get_today_plan(goal_id, today_date=today_date)
+    plan = get_next_actionable_daily_plan(goal_id, reference_date=reference_date)
     if not plan:
         return None
+
+    if not _daily_plan_needs_detailing(plan):
+        return plan
 
     if plan.status == DailyPlanStatus.done:
         return plan
 
-    # 🔥 PRIORITY LAYER
-    plan.tasks = _prioritize_tasks(plan.tasks)
-    plan.tasks = _ensure_tasks_are_executable(plan.tasks)
+    try:
+        context = _load_goal_generation_context(goal_id)
+        response_language = _infer_response_language(context)
+        day_payload = _build_day_payload_from_plan(plan)
 
-    # 🤖 DETAILING (как было)
-    if _daily_plan_needs_detailing(plan):
-        try:
-            context = _load_goal_generation_context(goal_id)
-            response_language = _infer_response_language(context)
-            day_payload = _build_day_payload_from_plan(plan)
+        detailing_service = DailyTaskDetailingService()
+        detailed_day = await _safe_enrich_day(
+            detailing_service=detailing_service,
+            context=context,
+            day_payload=day_payload,
+            response_language=response_language,
+        )
+    except Exception as e:
+        print(f"⚠️ enrich_next_actionable_daily_plan_if_needed failed: {e}")
+        return plan
 
-            detailing_service = DailyTaskDetailingService()
+    if not detailed_day or not isinstance(detailed_day, dict):
+        return plan
 
-            detailed_day = await _safe_enrich_day(
-                detailing_service=detailing_service,
-                context=context,
-                day_payload=day_payload,
-                response_language=response_language,
-            )
+    if not detailed_day.get("tasks"):
+        return plan
 
-            if detailed_day and isinstance(detailed_day, dict) and detailed_day.get("tasks"):
-                _update_detailed_daily_plan(plan.id, detailed_day)
-
-                refreshed_plan = get_daily_plan_by_id(plan.id)
-                if refreshed_plan:
-                    plan = refreshed_plan
-
-        except Exception as e:
-            print(f"⚠️ enrich_today_plan_if_needed failed: {e}")
-
-    # 🔥 COACH UX LAYER
-    if not plan.headline:
-        plan.headline = _build_headline(plan)
-
-    if not plan.focus_message:
-        plan.focus_message = _build_focus_message(plan)
-
-    return plan
+    try:
+        _update_detailed_daily_plan(plan.id, detailed_day)
+        refreshed_plan = get_daily_plan_by_id(plan.id)
+        return refreshed_plan or plan
+    except Exception as e:
+        print(f"⚠️ _update_detailed_daily_plan failed: {e}")
+        return plan
