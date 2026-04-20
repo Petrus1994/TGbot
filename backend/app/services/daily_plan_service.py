@@ -866,83 +866,82 @@ def get_next_actionable_daily_plan(
         if not _is_goal_allowed_for_date(goal_id, reference_date):
             return None
 
-        return _build_daily_plan_response(conn, pending_rows[0])
-
-
-def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | None:
-    with engine.begin() as conn:
-        stats_row = conn.execute(
-            text(
-                """
-                SELECT
-                    COUNT(*) AS total_tasks,
-                    COUNT(*) FILTER (WHERE status = 'done') AS done_tasks,
-                    COUNT(*) FILTER (WHERE status = 'skipped') AS skipped_tasks
-                FROM daily_tasks
-                WHERE daily_plan_id = :daily_plan_id
-                """
-            ),
-            {"daily_plan_id": daily_plan_id},
-        ).mappings().one()
-
-        total_tasks = int(stats_row["total_tasks"])
-        done_tasks = int(stats_row["done_tasks"])
-        skipped_tasks = int(stats_row["skipped_tasks"])
-
-        if total_tasks == 0:
-            new_status = DailyPlanStatus.pending.value
-        elif done_tasks == total_tasks:
-            new_status = DailyPlanStatus.done.value
-        elif skipped_tasks == total_tasks:
-            new_status = DailyPlanStatus.skipped.value
-        elif done_tasks > 0 or skipped_tasks > 0:
-            new_status = DailyPlanStatus.in_progress.value
-        else:
-            new_status = DailyPlanStatus.pending.value
-
-        conn.execute(
-            text(
-                """
-                UPDATE daily_plans
-                SET status = :status,
-                    updated_at = NOW()
-                WHERE id = :daily_plan_id
-                """
-            ),
-            {
-                "daily_plan_id": daily_plan_id,
-                "status": new_status,
-            },
-        )
-
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    goal_id,
-                    day_number,
-                    planned_date,
-                    focus,
-                    summary,
-                    headline,
-                    focus_message,
-                    main_task_title,
-                    total_estimated_minutes,
-                    status,
-                    created_at
-                FROM daily_plans
-                WHERE id = :daily_plan_id
-                LIMIT 1
-                """
-            ),
-            {"daily_plan_id": daily_plan_id},
-        ).mappings().first()
-
-        if not row:
-            return None
-
-        return _build_daily_plan_response(conn, row)
+            return _build_daily_plan_response(conn, pending_rows[0])
+    
+    def recalculate_daily_plan_status(daily_plan_id: str) -> DailyPlanResponse | None:
+        with engine.begin() as conn:
+            stats_row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS total_tasks,
+                        COUNT(*) FILTER (WHERE status = 'done') AS done_tasks,
+                        COUNT(*) FILTER (WHERE status = 'skipped') AS skipped_tasks
+                    FROM daily_tasks
+                    WHERE daily_plan_id = :daily_plan_id
+                    """
+                ),
+                {"daily_plan_id": daily_plan_id},
+            ).mappings().one()
+    
+            total_tasks = int(stats_row["total_tasks"])
+            done_tasks = int(stats_row["done_tasks"])
+            skipped_tasks = int(stats_row["skipped_tasks"])
+    
+            if total_tasks == 0:
+                new_status = DailyPlanStatus.pending.value
+            elif done_tasks == total_tasks:
+                new_status = DailyPlanStatus.done.value
+            elif skipped_tasks == total_tasks:
+                new_status = DailyPlanStatus.skipped.value
+            elif done_tasks > 0 or skipped_tasks > 0:
+                new_status = DailyPlanStatus.in_progress.value
+            else:
+                new_status = DailyPlanStatus.pending.value
+    
+            conn.execute(
+                text(
+                    """
+                    UPDATE daily_plans
+                    SET status = :status,
+                        updated_at = NOW()
+                    WHERE id = :daily_plan_id
+                    """
+                ),
+                {
+                    "daily_plan_id": daily_plan_id,
+                    "status": new_status,
+                },
+            )
+    
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        goal_id,
+                        day_number,
+                        planned_date,
+                        focus,
+                        summary,
+                        headline,
+                        focus_message,
+                        main_task_title,
+                        total_estimated_minutes,
+                        status,
+                        created_at
+                    FROM daily_plans
+                    WHERE id = :daily_plan_id
+                    LIMIT 1
+                    """
+                ),
+                {"daily_plan_id": daily_plan_id},
+            ).mappings().first()
+    
+            if not row:
+                return None
+    
+            return _build_daily_plan_response(conn, row)
 
 
 def update_daily_task_status(
@@ -1115,6 +1114,8 @@ def _daily_plan_needs_detailing(plan: DailyPlanResponse) -> bool:
             if not task.why_today:
                 return True
             if not task.success_criteria:
+                return True
+            if task.proof_required and not task.proof_prompt:
                 return True
             if task.detail_level >= 2 and not task.steps:
                 return True

@@ -11,7 +11,11 @@ from app.models.plan import GoalPlan, PlanStatus
 from app.repositories.plan_repository import PlanRepository
 from app.schemas.daily_plan import GeneratedDailyPlan, GeneratedDailyTask
 from app.schemas.plan import AcceptPlanResponse, PlanContent, PlanResponse
-from app.services.daily_plan_service import create_daily_plans_for_goal
+from app.services.daily_cycle_service import assign_first_cycle_for_goal
+from app.services.daily_plan_service import (
+    create_daily_plans_for_goal,
+    enrich_next_actionable_daily_plan_if_needed,
+)
 
 
 def _build_stub_plan(goal_id: str) -> dict:
@@ -178,11 +182,26 @@ def _content_dict_to_generated_days(content: dict) -> list[GeneratedDailyPlan]:
         tasks = [
             GeneratedDailyTask(
                 title=task["title"],
+                objective=task.get("objective"),
                 description=task.get("description"),
                 instructions=task.get("instructions"),
+                why_today=task.get("why_today"),
+                success_criteria=task.get("success_criteria"),
                 estimated_minutes=task.get("estimated_minutes"),
+                detail_level=task.get("detail_level", 1),
+                bucket=task.get("bucket", "must"),
+                priority=task.get("priority", "medium"),
                 is_required=task.get("is_required", True),
                 proof_required=task.get("proof_required", False),
+                recommended_proof_type=task.get("recommended_proof_type"),
+                proof_prompt=task.get("proof_prompt"),
+                task_type=task.get("task_type"),
+                difficulty=task.get("difficulty"),
+                tips=task.get("tips") or [],
+                technique_cues=task.get("technique_cues") or [],
+                common_mistakes=task.get("common_mistakes") or [],
+                steps=task.get("steps") or [],
+                resources=task.get("resources") or [],
             )
             for task in raw_day.get("tasks", [])
         ]
@@ -192,6 +211,10 @@ def _content_dict_to_generated_days(content: dict) -> list[GeneratedDailyPlan]:
                 day_number=raw_day["day_number"],
                 focus=raw_day["focus"],
                 summary=raw_day.get("summary"),
+                headline=raw_day.get("headline"),
+                focus_message=raw_day.get("focus_message"),
+                main_task_title=raw_day.get("main_task_title"),
+                total_estimated_minutes=raw_day.get("total_estimated_minutes"),
                 planned_date=raw_day.get("planned_date"),
                 tasks=tasks,
             )
@@ -255,8 +278,6 @@ def save_generated_plan(
             plan.version = next_version
             plan = repo.save(plan)
 
-        _sync_daily_plans(goal_id, normalized_content)
-
         return _to_plan_response(plan)
 
     except Exception as e:
@@ -299,8 +320,6 @@ def generate_plan(goal_id: str, regenerate: bool = False) -> PlanResponse:
             plan.version = next_version
             plan = repo.save(plan)
 
-        _sync_daily_plans(goal_id, normalized_content)
-
         return _to_plan_response(plan)
 
     except Exception as e:
@@ -331,7 +350,7 @@ def get_current_plan(goal_id: str) -> PlanResponse | None:
         db.close()
 
 
-def accept_plan(goal_id: str) -> AcceptPlanResponse:
+async def accept_plan(goal_id: str) -> AcceptPlanResponse:
     db: Session = SessionLocal()
     try:
         repo = PlanRepository(db)
@@ -345,6 +364,15 @@ def accept_plan(goal_id: str) -> AcceptPlanResponse:
         plan.accepted_at = now
 
         saved = repo.save(plan)
+        content = _deserialize_plan_content(saved.content_json)
+
+        _sync_daily_plans(goal_id, content)
+        assign_first_cycle_for_goal(goal_id)
+
+        try:
+            await enrich_next_actionable_daily_plan_if_needed(goal_id)
+        except Exception as e:
+            print(f"⚠️ ACCEPT PLAN PREPARE DAY FAILED: {e}")
 
         return AcceptPlanResponse(
             success=True,

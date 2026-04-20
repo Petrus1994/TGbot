@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Tuple
+import asyncio
 import re
+from typing import Tuple
 
 from app.models.proof import ProofStatus
 
@@ -131,8 +132,6 @@ CODING_MARKERS = {
     "коммит",
     "репо",
     "исправил",
-    "сделал фичу",
-    "скрипт",
     "реализовал",
 }
 
@@ -172,8 +171,6 @@ PHOTO_LIKE_WORDS = {
     "прикрепил",
 }
 
-ATTACHMENT_PROOF_TYPES = {"photo", "screenshot", "file", "video"}
-
 
 def _normalize_text(value: str | None) -> str:
     if not value:
@@ -192,12 +189,30 @@ def _extract_numbers(text: str) -> list[int]:
 def _looks_meaningful_text(text: str) -> bool:
     if len(text.strip()) < 12:
         return False
+
     words = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text)
     return len(words) >= 3
 
 
-def _task_context(task_title: str | None, task_description: str | None) -> str:
-    return _normalize_text(f"{task_title or ''} {task_description or ''}")
+def _task_context(
+    task_title: str | None,
+    task_description: str | None,
+    task_instructions: str | None,
+    task_success_criteria: str | None,
+    proof_prompt: str | None,
+) -> str:
+    return _normalize_text(
+        " ".join(
+            part
+            for part in [
+                task_title or "",
+                task_description or "",
+                task_instructions or "",
+                task_success_criteria or "",
+                proof_prompt or "",
+            ]
+        )
+    )
 
 
 def _proof_context(proof_text: str | None, proof_caption: str | None) -> str:
@@ -224,72 +239,9 @@ def _is_planning_task(task_text: str) -> bool:
     return _contains_any(task_text, PLANNING_MARKERS)
 
 
-def _has_attachment(
-    *,
-    proof_type: str | None,
-    telegram_file_id: str | None,
-    mime_type: str | None,
-    filename: str | None,
-) -> bool:
-    normalized_type = _normalize_text(proof_type)
-    return bool(
-        telegram_file_id
-        or mime_type
-        or filename
-        or normalized_type in ATTACHMENT_PROOF_TYPES
-    )
-
-
-def _evaluate_attachment_only(
-    *,
-    task_text: str,
-    proof_type: str | None,
-) -> tuple[ProofStatus, str] | None:
-    normalized_type = _normalize_text(proof_type)
-
-    if normalized_type == "photo":
-        if _is_reading_task(task_text):
-            return (
-                ProofStatus.accepted,
-                "Photo proof accepted: it is enough for this reading task.",
-            )
-        if _is_workout_task(task_text):
-            return (
-                ProofStatus.accepted,
-                "Photo proof accepted: it is enough for this workout task.",
-            )
-        return (
-            ProofStatus.accepted,
-            "Photo proof accepted.",
-        )
-
-    if normalized_type == "screenshot":
-        if _is_coding_task(task_text):
-            return (
-                ProofStatus.accepted,
-                "Screenshot proof accepted for coding progress.",
-            )
-        if _is_writing_task(task_text):
-            return (
-                ProofStatus.accepted,
-                "Screenshot proof accepted for writing progress.",
-            )
-        return (
-            ProofStatus.accepted,
-            "Screenshot proof accepted.",
-        )
-
-    if normalized_type in {"file", "video"}:
-        return (
-            ProofStatus.accepted,
-            "Attached file proof accepted.",
-        )
-
-    return None
-
-
 def _evaluate_reading_proof(
     proof_text: str,
+    *,
     has_attachment: bool,
 ) -> tuple[ProofStatus, str] | None:
     numbers = _extract_numbers(proof_text)
@@ -297,19 +249,25 @@ def _evaluate_reading_proof(
     if len(numbers) >= 2:
         return (
             ProofStatus.accepted,
-            "Reading progress confirmed by page range.",
+            "Proof looks valid: reading progress with page range is provided.",
         )
 
-    if has_attachment or _contains_any(proof_text, PHOTO_LIKE_WORDS):
+    if has_attachment:
         return (
             ProofStatus.accepted,
-            "Reading proof accepted by photo or screenshot.",
+            "Proof looks valid: attached photo or screenshot is enough for reading progress.",
+        )
+
+    if _contains_any(proof_text, PHOTO_LIKE_WORDS):
+        return (
+            ProofStatus.accepted,
+            "Proof looks valid: a photo or screenshot of reading progress is mentioned.",
         )
 
     if _looks_meaningful_text(proof_text) and _contains_any(proof_text, POSITIVE_MARKERS):
         return (
             ProofStatus.accepted,
-            "Reading progress described clearly enough.",
+            "Proof looks reasonable: reading progress is described clearly.",
         )
 
     return None
@@ -317,26 +275,33 @@ def _evaluate_reading_proof(
 
 def _evaluate_workout_proof(
     proof_text: str,
+    *,
     has_attachment: bool,
 ) -> tuple[ProofStatus, str] | None:
     numbers = _extract_numbers(proof_text)
 
-    if has_attachment or _contains_any(proof_text, PHOTO_LIKE_WORDS):
+    if has_attachment:
         return (
             ProofStatus.accepted,
-            "Workout proof accepted by photo or attachment.",
+            "Proof looks valid: attached workout photo, screenshot, or file is enough.",
+        )
+
+    if _contains_any(proof_text, PHOTO_LIKE_WORDS):
+        return (
+            ProofStatus.accepted,
+            "Proof looks valid: workout context photo or screenshot is mentioned.",
         )
 
     if len(numbers) >= 1 and _contains_any(proof_text, WORKOUT_MARKERS | POSITIVE_MARKERS):
         return (
             ProofStatus.accepted,
-            "Workout details detected in proof.",
+            "Proof looks valid: workout details with repetitions, duration, or exercise are provided.",
         )
 
     if _looks_meaningful_text(proof_text) and _contains_any(proof_text, POSITIVE_MARKERS):
         return (
             ProofStatus.accepted,
-            "Workout completion described clearly enough.",
+            "Proof looks reasonable: workout completion is described clearly.",
         )
 
     return None
@@ -344,18 +309,25 @@ def _evaluate_workout_proof(
 
 def _evaluate_writing_proof(
     proof_text: str,
+    *,
     has_attachment: bool,
 ) -> tuple[ProofStatus, str] | None:
-    if has_attachment or _contains_any(proof_text, PHOTO_LIKE_WORDS):
+    if has_attachment:
         return (
             ProofStatus.accepted,
-            "Writing proof accepted by screenshot or attachment.",
+            "Proof looks valid: attached screenshot, photo, or file is enough for written work.",
+        )
+
+    if _contains_any(proof_text, PHOTO_LIKE_WORDS):
+        return (
+            ProofStatus.accepted,
+            "Proof looks valid: screenshot or image of the written result is mentioned.",
         )
 
     if _looks_meaningful_text(proof_text):
         return (
             ProofStatus.accepted,
-            "Writing result described clearly enough.",
+            "Proof looks valid: the written result is described with enough detail.",
         )
 
     return None
@@ -363,18 +335,25 @@ def _evaluate_writing_proof(
 
 def _evaluate_coding_proof(
     proof_text: str,
+    *,
     has_attachment: bool,
 ) -> tuple[ProofStatus, str] | None:
-    if has_attachment or _contains_any(proof_text, PHOTO_LIKE_WORDS):
+    if has_attachment:
         return (
             ProofStatus.accepted,
-            "Coding proof accepted by screenshot or attachment.",
+            "Proof looks valid: attached screenshot or file is enough for coding progress.",
+        )
+
+    if _contains_any(proof_text, PHOTO_LIKE_WORDS):
+        return (
+            ProofStatus.accepted,
+            "Proof looks valid: screenshot or attachment for coding progress is mentioned.",
         )
 
     if _contains_any(proof_text, CODING_MARKERS) and _looks_meaningful_text(proof_text):
         return (
             ProofStatus.accepted,
-            "Coding progress described clearly enough.",
+            "Proof looks valid: coding progress is described clearly.",
         )
 
     return None
@@ -382,11 +361,19 @@ def _evaluate_coding_proof(
 
 def _evaluate_planning_proof(
     proof_text: str,
+    *,
+    has_attachment: bool,
 ) -> tuple[ProofStatus, str] | None:
+    if has_attachment:
+        return (
+            ProofStatus.accepted,
+            "Proof looks valid: attached screenshot, note, or file is enough for planning work.",
+        )
+
     if _looks_meaningful_text(proof_text):
         return (
             ProofStatus.accepted,
-            "Planning result described clearly enough.",
+            "Proof looks valid: planning or reflection result is described clearly.",
         )
 
     return None
@@ -394,42 +381,53 @@ def _evaluate_planning_proof(
 
 def _generic_acceptance(
     proof_text: str,
+    *,
     has_attachment: bool,
 ) -> tuple[ProofStatus, str] | None:
-    if has_attachment or _contains_any(proof_text, PHOTO_LIKE_WORDS):
+    if has_attachment:
         return (
             ProofStatus.accepted,
-            "Attachment-based proof accepted.",
+            "Proof looks valid: attachment is present and can serve as lightweight evidence.",
+        )
+
+    if _contains_any(proof_text, PHOTO_LIKE_WORDS):
+        return (
+            ProofStatus.accepted,
+            "Proof looks valid: attachment, photo, or screenshot is referenced.",
         )
 
     if _looks_meaningful_text(proof_text) and _contains_any(proof_text, POSITIVE_MARKERS):
         return (
             ProofStatus.accepted,
-            "Completion described clearly enough.",
+            "Proof looks valid: completion is described clearly enough.",
         )
 
     return None
 
 
-def _run_review_core(
+async def run_ai_proof_review(
     *,
     task_title: str | None,
     task_description: str | None,
+    task_instructions: str | None = None,
+    task_success_criteria: str | None = None,
+    proof_prompt: str | None = None,
+    recommended_proof_type: str | None = None,
+    proof_type: str | None = None,
     proof_text: str | None,
     proof_caption: str | None,
-    proof_type: str | None,
-    telegram_file_id: str | None,
-    mime_type: str | None,
-    filename: str | None,
+    has_attachment: bool = False,
 ) -> Tuple[ProofStatus, str]:
-    task_text = _task_context(task_title, task_description)
-    proof_text_norm = _proof_context(proof_text, proof_caption)
-    has_attachment = _has_attachment(
-        proof_type=proof_type,
-        telegram_file_id=telegram_file_id,
-        mime_type=mime_type,
-        filename=filename,
+    task_text = _task_context(
+        task_title,
+        task_description,
+        task_instructions,
+        task_success_criteria,
+        proof_prompt,
     )
+    proof_text_norm = _proof_context(proof_text, proof_caption)
+
+    normalized_proof_type = _normalize_text(proof_type or recommended_proof_type)
 
     if not proof_text_norm.strip() and not has_attachment:
         return (
@@ -437,64 +435,69 @@ def _run_review_core(
             "Proof is missing. Add a short explanation or attach evidence.",
         )
 
-    if not proof_text_norm.strip() and has_attachment:
-        attachment_result = _evaluate_attachment_only(
-            task_text=task_text,
-            proof_type=proof_type,
-        )
-        if attachment_result:
-            return attachment_result
-
-        return (
-            ProofStatus.accepted,
-            "Attachment received and accepted as proof.",
-        )
-
-    if _contains_any(proof_text_norm, WEAK_MARKERS) and len(proof_text_norm) < 20 and not has_attachment:
+    if proof_text_norm and _contains_any(proof_text_norm, WEAK_MARKERS) and len(proof_text_norm) < 20:
         return (
             ProofStatus.needs_more,
-            "Proof is too vague. Add a clearer result or simple evidence.",
+            "Proof is too vague. Add a clearer result or attach simple evidence.",
         )
 
-    if len(proof_text_norm) < 6 and not has_attachment:
+    if proof_text_norm and len(proof_text_norm) < 6 and not has_attachment:
         return (
             ProofStatus.needs_more,
             "Proof is too short. Add a few words about what exactly was completed.",
         )
 
     if _is_reading_task(task_text):
-        result = _evaluate_reading_proof(proof_text_norm, has_attachment)
+        result = _evaluate_reading_proof(
+            proof_text_norm,
+            has_attachment=has_attachment,
+        )
         if result:
             return result
 
     if _is_workout_task(task_text):
-        result = _evaluate_workout_proof(proof_text_norm, has_attachment)
+        result = _evaluate_workout_proof(
+            proof_text_norm,
+            has_attachment=has_attachment,
+        )
         if result:
             return result
 
     if _is_writing_task(task_text):
-        result = _evaluate_writing_proof(proof_text_norm, has_attachment)
+        result = _evaluate_writing_proof(
+            proof_text_norm,
+            has_attachment=has_attachment,
+        )
         if result:
             return result
 
     if _is_coding_task(task_text):
-        result = _evaluate_coding_proof(proof_text_norm, has_attachment)
+        result = _evaluate_coding_proof(
+            proof_text_norm,
+            has_attachment=has_attachment,
+        )
         if result:
             return result
 
     if _is_planning_task(task_text):
-        result = _evaluate_planning_proof(proof_text_norm)
+        result = _evaluate_planning_proof(
+            proof_text_norm,
+            has_attachment=has_attachment,
+        )
         if result:
             return result
 
-    generic_result = _generic_acceptance(proof_text_norm, has_attachment)
+    generic_result = _generic_acceptance(
+        proof_text_norm,
+        has_attachment=has_attachment,
+    )
     if generic_result:
         return generic_result
 
-    if has_attachment:
+    if has_attachment and normalized_proof_type in {"photo", "screenshot", "file", "video"}:
         return (
-            ProofStatus.needs_more,
-            "Attachment received, but add a short note with the concrete result.",
+            ProofStatus.accepted,
+            "Proof looks acceptable: attached evidence is present.",
         )
 
     if len(proof_text_norm) >= 20:
@@ -509,47 +512,5 @@ def _run_review_core(
     )
 
 
-async def run_ai_proof_review(
-    *,
-    task_title: str | None,
-    task_description: str | None,
-    proof_text: str | None,
-    proof_caption: str | None,
-    proof_type: str | None = None,
-    telegram_file_id: str | None = None,
-    mime_type: str | None = None,
-    filename: str | None = None,
-) -> Tuple[ProofStatus, str]:
-    return _run_review_core(
-        task_title=task_title,
-        task_description=task_description,
-        proof_text=proof_text,
-        proof_caption=proof_caption,
-        proof_type=proof_type,
-        telegram_file_id=telegram_file_id,
-        mime_type=mime_type,
-        filename=filename,
-    )
-
-
-def run_ai_proof_review_sync(
-    *,
-    task_title: str | None,
-    task_description: str | None,
-    proof_text: str | None,
-    proof_caption: str | None,
-    proof_type: str | None = None,
-    telegram_file_id: str | None = None,
-    mime_type: str | None = None,
-    filename: str | None = None,
-) -> Tuple[ProofStatus, str]:
-    return _run_review_core(
-        task_title=task_title,
-        task_description=task_description,
-        proof_text=proof_text,
-        proof_caption=proof_caption,
-        proof_type=proof_type,
-        telegram_file_id=telegram_file_id,
-        mime_type=mime_type,
-        filename=filename,
-    )
+def run_ai_proof_review_sync(**kwargs):
+    return asyncio.run(run_ai_proof_review(**kwargs))

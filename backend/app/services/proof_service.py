@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import text
 
@@ -19,7 +20,7 @@ ACCEPTED_LIKE_PROOF_STATUSES = {
 }
 
 
-def _map_row_to_proof_response(row) -> ProofResponse:
+def _map_row_to_proof_response(row: Any) -> ProofResponse:
     return ProofResponse(
         proof_id=str(row["id"]),
         goal_id=str(row["goal_id"]),
@@ -50,7 +51,12 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
                     goal_id,
                     daily_plan_id,
                     title,
-                    description
+                    description,
+                    instructions,
+                    success_criteria,
+                    proof_required,
+                    recommended_proof_type,
+                    proof_prompt
                 FROM daily_tasks
                 WHERE id = :task_id
                 LIMIT 1
@@ -62,7 +68,7 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
         if not task_row:
             return None
 
-        row = conn.execute(
+        inserted_row = conn.execute(
             text(
                 """
                 INSERT INTO proofs (
@@ -93,7 +99,23 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
                     :status,
                     :submitted_at
                 )
-                RETURNING *
+                RETURNING
+                    id,
+                    goal_id,
+                    daily_plan_id,
+                    daily_task_id,
+                    proof_type,
+                    telegram_file_id,
+                    file_unique_id,
+                    mime_type,
+                    filename,
+                    caption,
+                    text,
+                    status,
+                    review_message,
+                    submitted_at,
+                    reviewed_at,
+                    created_at
                 """
             ),
             {
@@ -112,18 +134,24 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
             },
         ).mappings().one()
 
-    proof = _map_row_to_proof_response(row)
+    proof = _map_row_to_proof_response(inserted_row)
 
     try:
         review_status, review_message = run_ai_proof_review_sync(
             task_title=task_row.get("title"),
             task_description=task_row.get("description"),
+            task_instructions=task_row.get("instructions"),
+            task_success_criteria=task_row.get("success_criteria"),
+            proof_prompt=task_row.get("proof_prompt"),
+            recommended_proof_type=task_row.get("recommended_proof_type"),
+            proof_type=proof.proof_type.value if hasattr(proof.proof_type, "value") else str(proof.proof_type),
             proof_text=proof.text,
             proof_caption=proof.caption,
-            proof_type=proof.proof_type,
-            telegram_file_id=proof.telegram_file_id,
-            mime_type=proof.mime_type,
-            filename=proof.filename,
+            has_attachment=bool(
+                proof.telegram_file_id
+                or proof.file_unique_id
+                or proof.filename
+            ),
         )
 
         with engine.begin() as conn:
@@ -150,7 +178,23 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
             updated_row = conn.execute(
                 text(
                     """
-                    SELECT *
+                    SELECT
+                        id,
+                        goal_id,
+                        daily_plan_id,
+                        daily_task_id,
+                        proof_type,
+                        telegram_file_id,
+                        file_unique_id,
+                        mime_type,
+                        filename,
+                        caption,
+                        text,
+                        status,
+                        review_message,
+                        submitted_at,
+                        reviewed_at,
+                        created_at
                     FROM proofs
                     WHERE id = :proof_id
                     LIMIT 1
@@ -172,7 +216,23 @@ def list_task_proofs(task_id: str) -> list[ProofResponse]:
         rows = conn.execute(
             text(
                 """
-                SELECT *
+                SELECT
+                    id,
+                    goal_id,
+                    daily_plan_id,
+                    daily_task_id,
+                    proof_type,
+                    telegram_file_id,
+                    file_unique_id,
+                    mime_type,
+                    filename,
+                    caption,
+                    text,
+                    status,
+                    review_message,
+                    submitted_at,
+                    reviewed_at,
+                    created_at
                 FROM proofs
                 WHERE daily_task_id = :task_id
                 ORDER BY created_at ASC
@@ -221,7 +281,23 @@ def review_proof(proof_id: str, payload: ReviewProofRequest) -> ProofResponse | 
                     reviewed_at = :reviewed_at,
                     updated_at = NOW()
                 WHERE id = :proof_id
-                RETURNING *
+                RETURNING
+                    id,
+                    goal_id,
+                    daily_plan_id,
+                    daily_task_id,
+                    proof_type,
+                    telegram_file_id,
+                    file_unique_id,
+                    mime_type,
+                    filename,
+                    caption,
+                    text,
+                    status,
+                    review_message,
+                    submitted_at,
+                    reviewed_at,
+                    created_at
                 """
             ),
             {
@@ -241,7 +317,7 @@ def task_has_required_proof(task_id: str) -> bool:
 
 def task_has_accepted_required_proof(task_id: str) -> bool:
     with engine.begin() as conn:
-        row = conn.execute(
+        has_accepted = conn.execute(
             text(
                 """
                 SELECT EXISTS(
@@ -249,13 +325,13 @@ def task_has_accepted_required_proof(task_id: str) -> bool:
                     FROM proofs
                     WHERE daily_task_id = :task_id
                       AND status = 'accepted'
-                )
+                ) AS has_accepted
                 """
             ),
             {"task_id": task_id},
-        ).scalar()
+        ).mappings().one()
 
-        return bool(row)
+        return bool(has_accepted["has_accepted"])
 
 
 def daily_plan_all_required_proofs_present(daily_plan_id: str) -> bool:
@@ -267,12 +343,12 @@ def daily_plan_all_required_proofs_present(daily_plan_id: str) -> bool:
                     COUNT(*) FILTER (WHERE proof_required = TRUE) AS required_tasks,
                     COUNT(*) FILTER (
                         WHERE proof_required = TRUE
-                        AND EXISTS (
-                            SELECT 1
-                            FROM proofs p
-                            WHERE p.daily_task_id = daily_tasks.id
-                              AND p.status = 'accepted'
-                        )
+                          AND EXISTS (
+                              SELECT 1
+                              FROM proofs p
+                              WHERE p.daily_task_id = daily_tasks.id
+                                AND p.status = 'accepted'
+                          )
                     ) AS satisfied_required_tasks
                 FROM daily_tasks
                 WHERE daily_plan_id = :daily_plan_id
@@ -281,4 +357,58 @@ def daily_plan_all_required_proofs_present(daily_plan_id: str) -> bool:
             {"daily_plan_id": daily_plan_id},
         ).mappings().one()
 
-        return int(stats["required_tasks"] or 0) == int(stats["satisfied_required_tasks"] or 0)
+        required_tasks = int(stats["required_tasks"] or 0)
+        satisfied_required_tasks = int(stats["satisfied_required_tasks"] or 0)
+
+        if required_tasks == 0:
+            return True
+
+        return required_tasks == satisfied_required_tasks
+
+
+def daily_plan_all_required_proofs_accepted(daily_plan_id: str) -> bool:
+    return daily_plan_all_required_proofs_present(daily_plan_id)
+
+
+def get_daily_plan_proof_summary(daily_plan_id: str) -> dict[str, Any]:
+    with engine.begin() as conn:
+        stats = conn.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE proof_required = TRUE) AS required_tasks_total,
+                    COUNT(*) FILTER (
+                        WHERE proof_required = TRUE
+                          AND EXISTS (
+                              SELECT 1
+                              FROM proofs p
+                              WHERE p.daily_task_id = daily_tasks.id
+                          )
+                    ) AS required_tasks_with_any_proof,
+                    COUNT(*) FILTER (
+                        WHERE proof_required = TRUE
+                          AND EXISTS (
+                              SELECT 1
+                              FROM proofs p
+                              WHERE p.daily_task_id = daily_tasks.id
+                                AND p.status = 'accepted'
+                          )
+                    ) AS required_tasks_satisfied
+                FROM daily_tasks
+                WHERE daily_plan_id = :daily_plan_id
+                """
+            ),
+            {"daily_plan_id": daily_plan_id},
+        ).mappings().one()
+
+        required_total = int(stats["required_tasks_total"] or 0)
+        with_any_proof = int(stats["required_tasks_with_any_proof"] or 0)
+        satisfied = int(stats["required_tasks_satisfied"] or 0)
+
+        return {
+            "daily_plan_id": daily_plan_id,
+            "required_tasks_total": required_total,
+            "required_tasks_with_any_proof": with_any_proof,
+            "required_tasks_satisfied": satisfied,
+            "all_required_proofs_present": required_total == 0 or required_total == satisfied,
+        }
