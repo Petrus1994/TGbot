@@ -1524,4 +1524,42 @@ async def enrich_next_actionable_daily_plan_if_needed(
     goal_id: str,
     reference_date: date | None = None,
 ) -> DailyPlanResponse | None:
-    return get_next_actionable_daily_plan(goal_id, reference_date=reference_date)
+    plan = get_next_actionable_daily_plan(goal_id, reference_date=reference_date)
+    if not plan:
+        return None
+
+    if not _daily_plan_needs_detailing(plan):
+        return plan
+
+    if plan.status == DailyPlanStatus.done:
+        return plan
+
+    try:
+        context = _load_goal_generation_context(goal_id)
+        response_language = _infer_response_language(context)
+        day_payload = _build_day_payload_from_plan(plan)
+
+        detailing_service = DailyTaskDetailingService()
+        detailed_day = await _safe_enrich_day(
+            detailing_service=detailing_service,
+            context=context,
+            day_payload=day_payload,
+            response_language=response_language,
+        )
+    except Exception as e:
+        print(f"⚠️ enrich_next_actionable_daily_plan_if_needed failed: {e}")
+        return plan
+
+    if not detailed_day or not isinstance(detailed_day, dict):
+        return plan
+
+    if not detailed_day.get("tasks"):
+        return plan
+
+    try:
+        _update_detailed_daily_plan(plan.id, detailed_day)
+        refreshed_plan = get_daily_plan_by_id(plan.id)
+        return refreshed_plan or plan
+    except Exception as e:
+        print(f"⚠️ _update_detailed_daily_plan failed: {e}")
+        return plan

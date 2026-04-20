@@ -11,8 +11,6 @@ from app.schemas.proof import (
     ProofResponse,
     ReviewProofRequest,
 )
-
-# 🔥 AI review
 from app.services.ai_proof_review_service import run_ai_proof_review_sync
 
 
@@ -47,7 +45,12 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
         task_row = conn.execute(
             text(
                 """
-                SELECT id, goal_id, daily_plan_id, title, description
+                SELECT
+                    id,
+                    goal_id,
+                    daily_plan_id,
+                    title,
+                    description
                 FROM daily_tasks
                 WHERE id = :task_id
                 LIMIT 1
@@ -111,13 +114,16 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
 
     proof = _map_row_to_proof_response(row)
 
-    # 🔥 AI REVIEW (фикс)
     try:
         review_status, review_message = run_ai_proof_review_sync(
             task_title=task_row.get("title"),
             task_description=task_row.get("description"),
             proof_text=proof.text,
             proof_caption=proof.caption,
+            proof_type=proof.proof_type,
+            telegram_file_id=proof.telegram_file_id,
+            mime_type=proof.mime_type,
+            filename=proof.filename,
         )
 
         with engine.begin() as conn:
@@ -141,10 +147,15 @@ def create_proof_for_task(task_id: str, payload: CreateProofRequest) -> ProofRes
                 },
             )
 
-        # обновляем proof перед возвратом
-        with engine.begin() as conn:
             updated_row = conn.execute(
-                text("SELECT * FROM proofs WHERE id = :proof_id"),
+                text(
+                    """
+                    SELECT *
+                    FROM proofs
+                    WHERE id = :proof_id
+                    LIMIT 1
+                    """
+                ),
                 {"proof_id": proof.proof_id},
             ).mappings().one()
 
@@ -177,7 +188,12 @@ def review_proof(proof_id: str, payload: ReviewProofRequest) -> ProofResponse | 
     with engine.begin() as conn:
         existing = conn.execute(
             text(
-                "SELECT id FROM proofs WHERE id = :proof_id LIMIT 1"
+                """
+                SELECT id
+                FROM proofs
+                WHERE id = :proof_id
+                LIMIT 1
+                """
             ),
             {"proof_id": proof_id},
         ).mappings().first()
@@ -252,7 +268,8 @@ def daily_plan_all_required_proofs_present(daily_plan_id: str) -> bool:
                     COUNT(*) FILTER (
                         WHERE proof_required = TRUE
                         AND EXISTS (
-                            SELECT 1 FROM proofs p
+                            SELECT 1
+                            FROM proofs p
                             WHERE p.daily_task_id = daily_tasks.id
                               AND p.status = 'accepted'
                         )
