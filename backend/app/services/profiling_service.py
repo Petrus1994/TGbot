@@ -325,6 +325,60 @@ def _pick_forced_required_question(
     return None
 
 
+def _pick_next_unanswered_question(
+    questions: list[dict[str, Any]],
+    answers: dict[str, str],
+    asked_question_keys: list[str],
+    skipped_question_keys: list[str],
+) -> dict[str, Any] | None:
+    seen = set(asked_question_keys) | set(skipped_question_keys)
+
+    for question in questions:
+        key = str(question.get("key") or "").strip()
+        if not key:
+            continue
+        if key in answers:
+            continue
+        if key not in seen:
+            return question
+
+    for question in questions:
+        key = str(question.get("key") or "").strip()
+        if not key:
+            continue
+        if key not in answers:
+            return question
+
+    return None
+
+
+def _sanitize_next_step(next_step: Any) -> dict[str, Any]:
+    if not isinstance(next_step, dict):
+        return {
+            "is_completed": False,
+            "next_question_key": None,
+            "reason": "invalid_next_step_payload",
+        }
+
+    raw_completed = next_step.get("is_completed")
+    is_completed = raw_completed is True
+
+    next_question_key = next_step.get("next_question_key")
+    if next_question_key is not None:
+        next_question_key = str(next_question_key).strip() or None
+
+    reason = next_step.get("reason")
+    reason = str(reason).strip() if reason else None
+
+    return {
+        "is_completed": is_completed,
+        "next_question_key": next_question_key,
+        "reason": reason or (
+            "profiling_complete" if is_completed else "next_question_selected"
+        ),
+    }
+
+
 async def _build_and_validate_summary(
     *,
     goal_title: str,
@@ -352,7 +406,8 @@ async def start_profiling(goal_id: str) -> dict:
                 goal_title=goal["title"],
                 goal_description=goal.get("description"),
             )
-        except Exception:
+        except Exception as e:
+            print(f"❌ profiling_context_build_failed: {e}")
             raise HTTPException(status_code=500, detail="profiling_context_build_failed")
 
         context = _normalize_context(context)
@@ -420,151 +475,15 @@ async def start_profiling(goal_id: str) -> dict:
             },
         )
 
+        print(f"✅ profiling started goal_id={goal_id} first_question={first_question['key']}")
+
         return _build_state_response(
             goal_id=goal_id,
             state="awaiting_profiling_answer",
             substate=first_question["key"],
             context=context,
         )
-
-
-def get_current_question(goal_id: str) -> dict:
-    with engine.begin() as connection:
-        session = _get_goal_session(connection, goal_id)
-        context = _normalize_context(session["context_json"])
-
-        result = _build_state_response(
-            goal_id=goal_id,
-            state=session["state"],
-            substate=session["substate"],
-            context=context,
-        )
-
-        return {
-            "goal_id": result["goal_id"],
-            "current_question_key": result["current_question_key"],
-            "current_question_text": result["current_question_text"],
-            "example_answer": result.get("example_answer"),
-            "question_type": result.get("question_type"),
-            "suggested_options": result.get("suggested_options"),
-            "allow_free_text": result.get("allow_free_text"),
-            "follow_up_attempts": result.get("follow_up_attempts"),
-            "questions_answered_count": result["questions_answered_count"],
-            "questions_total_count": result["questions_total_count"],
-            "is_completed": result["is_completed"],
-        }
-
-
-async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
-    cleaned_answer = (answer or "").strip()
-    if not cleaned_answer:
-        raise HTTPException(status_code=400, detail="empty_answer")
-
-    with engine.begin() as connection:
-        session = _get_goal_session(connection, goal_id)
-        goal = _get_goal(connection, goal_id)
-        context = _normalize_context(session["context_json"])
-
-        profiling = _get_profiling_block(context)
-        questions = _get_questions(context)
-        answers = _get_answers(context)
-        asked_question_keys = _get_asked_question_keys(context)
-        skipped_question_keys = _get_skipped_question_keys(context)
-        follow_up_attempts = _get_follow_up_attempts(context)
-        current_question_key = _get_current_question_key(context)
-
-        if profiling.get("is_completed"):
-            raise HTTPException(status_code=400, detail="profiling_already_completed")
-
-        current_question = _find_question_by_key(questions, current_question_key)
-        if not current_question:
-            raise HTTPException(status_code=500, detail="current_question_not_found")
-
-        try:
-            evaluation = await profiling_quality_service.evaluate_answer(
-                goal_title=goal["title"],
-                goal_description=goal.get("description"),
-                question=current_question,
-                answer=cleaned_answer,
-                answers=answers,
-            )
-        except Exception:
-            raise HTTPException(status_code=500, detail="profiling_answer_evaluation_failed")
-
-        if not isinstance(evaluation, dict):
-            raise HTTPException(status_code=500, detail="profiling_answer_evaluation_invalid")
-
-        if not evaluation.get("accepted"):
-            current_attempts = follow_up_attempts.get(current_question["key"], 0) + 1
-            follow_up_attempts[current_question["key"]] = current_attempts
-
-            profiling["follow_up_attempts"] = follow_up_attempts
-            context["profiling"] = profiling
-
-            _apply_profiling_update(
-                connection,
-                goal_id=goal_id,
-                state=session["state"],
-                substate=session["substate"],
-                context=context,
-            )
-
-            feedback_message = evaluation.get("feedback_message")
-            follow_up_question = evaluation.get("follow_up_question")
-            suggested_options = evaluation.get("suggested_options")
-
-            if current_attempts >= MAX_FOLLOW_UP_ATTEMPTS_PER_QUESTION:
-                if not suggested_options:
-                    suggested_options = current_question.get("suggested_options")
-
-                feedback_message = (
-                    "Давай упростим. Можно выбрать самый близкий вариант или дать примерный, но полезный для плана ответ."
-                )
-                follow_up_question = (
-                    follow_up_question
-                    or "Выбери самый близкий вариант или ответь примерно, без идеальной точности."
-                )
-
-            return _build_state_response(
-                goal_id,
-                session["state"],
-                session["substate"],
-                context,
-                extra={
-                    "answer_accepted": False,
-                    "needs_follow_up": True,
-                    "feedback_message": feedback_message,
-                    "follow_up_question": follow_up_question,
-                    "example_answer": evaluation.get("example_answer"),
-                    "suggested_options": suggested_options,
-                    "follow_up_attempts": current_attempts,
-                },
-            )
-
-        answers[current_question["key"]] = cleaned_answer
-
-        if current_question["key"] not in asked_question_keys:
-            asked_question_keys.append(current_question["key"])
-
-        follow_up_attempts[current_question["key"]] = 0
-
-        try:
-            next_step = await dynamic_profiling_service.select_next_step(
-                goal_title=goal["title"],
-                goal_description=goal.get("description"),
-                questions=questions,
-                answers=answers,
-                asked_question_keys=asked_question_keys,
-                skipped_question_keys=skipped_question_keys,
-            )
-        except Exception:
-            raise HTTPException(status_code=500, detail="profiling_next_step_selection_failed")
-
-        if not isinstance(next_step, dict):
-            raise HTTPException(status_code=500, detail="profiling_next_step_invalid")
-
-        has_required_answers = _has_required_answers(answers)
-
+            # если модель говорит что всё — но обязательные не заполнены
         if next_step.get("is_completed") and not has_required_answers:
             forced_question = _pick_forced_required_question(
                 questions=questions,
@@ -615,6 +534,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 },
             )
 
+        # ======== ФИНАЛ ПРОФИЛИНГА ========
         if next_step.get("is_completed"):
             summary = await _build_and_validate_summary(
                 goal_title=goal["title"],
@@ -622,6 +542,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 answers=answers,
             )
 
+            # если summary говно → форсим ещё вопрос
             if not _is_summary_complete(summary):
                 forced_question = _pick_forced_required_question(
                     questions=questions,
@@ -661,7 +582,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                         extra={
                             "answer_accepted": True,
                             "needs_follow_up": False,
-                            "feedback_message": "Почти готово, но для точного плана не хватает ещё одного важного блока.",
+                            "feedback_message": "Почти готово, но нужно ещё одно уточнение.",
                         },
                     )
 
@@ -670,6 +591,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                     detail="profiling_summary_incomplete_and_no_forced_question_available",
                 )
 
+            # ✅ финал
             profiling.update(
                 {
                     "answers": answers,
@@ -685,6 +607,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
             )
             context["profiling"] = profiling
 
+            # обновляем goal статус
             connection.execute(
                 text(
                     """
@@ -716,6 +639,7 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
                 },
             )
 
+        # ======== ОБЫЧНЫЙ ПЕРЕХОД К СЛЕД ВОПРОСУ ========
         next_question_key = next_step.get("next_question_key")
         next_question = _find_question_by_key(questions, next_question_key)
 
@@ -756,6 +680,10 @@ async def submit_profiling_answer(goal_id: str, answer: str) -> dict:
             },
         )
 
+
+# =========================
+# STATE + UTILS
+# =========================
 
 def get_profiling_state(goal_id: str) -> dict:
     with engine.begin() as connection:
