@@ -38,6 +38,58 @@ class DailyTaskDetailingService:
             api_key=settings.openai_api_key,
             model=settings.openai_model,
         )
+            # =========================================================
+    # 🔥 EXECUTION INTELLIGENCE
+    # =========================================================
+
+    def _ensure_task_executable(self, task: dict[str, Any]) -> dict[str, Any]:
+        """
+        Делает задачу исполнимой даже если AI дал слабый ответ
+        """
+
+        if not task.get("why_today"):
+            task["why_today"] = "Это действие напрямую влияет на твой прогресс к цели."
+
+        if not task.get("success_criteria"):
+            task["success_criteria"] = "Задача выполнена полностью и без пропусков."
+
+        if task.get("estimated_minutes") is None:
+            task["estimated_minutes"] = 15
+
+        if task.get("detail_level", 1) >= 2:
+            if not task.get("steps"):
+                task["steps"] = [
+                    {
+                        "order": 1,
+                        "title": task.get("title") or "Step",
+                        "instruction": task.get("instructions") or "Выполни задачу полностью",
+                        "duration_minutes": None,
+                        "sets": None,
+                        "reps": None,
+                        "rest_seconds": None,
+                        "notes": [],
+                    }
+                ]
+
+        return task
+
+
+    def _ensure_day_executable(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tasks = payload.get("tasks", [])
+
+        fixed_tasks = []
+        for t in tasks:
+            fixed_tasks.append(self._ensure_task_executable(t))
+
+        payload["tasks"] = fixed_tasks
+
+        if not payload.get("headline"):
+            payload["headline"] = "Execution Day"
+
+        if not payload.get("focus_message") and fixed_tasks:
+            payload["focus_message"] = f"Главный фокус: {fixed_tasks[0]['title']}"
+
+        return payload
 
     async def enrich_single_day(
         self,
@@ -129,6 +181,7 @@ class DailyTaskDetailingService:
         raw_response: Any,
         original_day: dict[str, Any],
     ) -> dict[str, Any]:
+
         if hasattr(raw_response, "model_dump"):
             payload = raw_response.model_dump()
         elif isinstance(raw_response, dict):
@@ -139,8 +192,10 @@ class DailyTaskDetailingService:
         payload["headline"] = self._safe_text(payload.get("headline")) or self._safe_text(
             original_day.get("focus")
         ) or "Execution plan"
+
         payload["focus_message"] = self._safe_text(payload.get("focus_message"))
         payload["main_task_title"] = self._safe_text(payload.get("main_task_title"))
+
         payload["total_estimated_minutes"] = self._normalize_positive_int_or_none(
             payload.get("total_estimated_minutes")
         )
@@ -149,6 +204,9 @@ class DailyTaskDetailingService:
             raw_tasks=payload.get("tasks"),
             original_day=original_day,
         )
+
+        # 🔥 NEW: execution layer
+        payload = self._ensure_day_executable(payload)
 
         if payload["total_estimated_minutes"] is None:
             computed_total = sum(
