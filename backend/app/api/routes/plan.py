@@ -93,9 +93,9 @@ def get_current_plan_endpoint(goal_id: str):
     "/goals/{goal_id}/plan/accept",
     response_model=AcceptPlanResponse,
 )
-def accept_plan_endpoint(goal_id: str):
+async def accept_plan_endpoint(goal_id: str):
     try:
-        return accept_plan(goal_id=goal_id)
+        return await accept_plan(goal_id=goal_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
