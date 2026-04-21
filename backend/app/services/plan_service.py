@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from uuid import UUID
@@ -370,7 +371,9 @@ async def accept_plan(goal_id: str) -> AcceptPlanResponse:
         assign_first_cycle_for_goal(goal_id)
 
         try:
-            await enrich_next_actionable_daily_plan_if_needed(goal_id)
+            asyncio.create_task(
+                enrich_next_actionable_daily_plan_if_needed(goal_id)
+            )
         except Exception as e:
             print(f"⚠️ ACCEPT PLAN PREPARE DAY FAILED: {e}")
 
